@@ -194,6 +194,8 @@ pub struct Transaction {
     pub created_at_millis: u64,
     pub updated_at_millis: u64,
     pub timeout_millis: Option<u64>,
+    #[serde(default)]
+    pub options: TransactionOptions,
     pub metadata: BTreeMap<String, String>,
 }
 
@@ -232,8 +234,55 @@ impl Transaction {
             created_at_millis: now,
             updated_at_millis: now,
             timeout_millis: None,
+            options: TransactionOptions::default(),
             metadata: BTreeMap::new(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransactionOptions {
+    #[serde(default)]
+    pub wait_result: bool,
+    #[serde(default)]
+    pub retry_interval_millis: Option<u64>,
+    #[serde(default)]
+    pub request_timeout_millis: Option<u64>,
+    #[serde(default)]
+    pub retry_limit: Option<u32>,
+    #[serde(default)]
+    pub branch_headers: BTreeMap<String, String>,
+}
+
+impl TransactionOptions {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(value) = self.retry_interval_millis {
+            anyhow::ensure!(
+                (1..=86_400_000).contains(&value),
+                "retry interval must be between 1 and 86400000 milliseconds"
+            );
+        }
+        if let Some(value) = self.request_timeout_millis {
+            anyhow::ensure!(
+                (1..=86_400_000).contains(&value),
+                "request timeout must be between 1 and 86400000 milliseconds"
+            );
+        }
+        if let Some(value) = self.retry_limit {
+            anyhow::ensure!(value <= 10_000, "retry limit must not exceed 10000");
+        }
+        anyhow::ensure!(
+            self.branch_headers.len() <= 32
+                && self.branch_headers.iter().all(|(name, value)| {
+                    !name.is_empty()
+                        && name.len() <= 64
+                        && value.len() <= 1_024
+                        && reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_ok()
+                        && reqwest::header::HeaderValue::try_from(value.as_str()).is_ok()
+                }),
+            "branch headers exceed bounded name, value, or count limits"
+        );
+        Ok(())
     }
 }
 
@@ -399,6 +448,15 @@ where
 #[async_trait]
 pub trait BranchInvoker: Clone + Send + Sync + 'static {
     async fn invoke(&self, url: &str, payload: &serde_json::Value) -> anyhow::Result<()>;
+
+    async fn invoke_with_options(
+        &self,
+        url: &str,
+        payload: &serde_json::Value,
+        _options: &TransactionOptions,
+    ) -> anyhow::Result<()> {
+        self.invoke(url, payload).await
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -488,8 +546,26 @@ impl Default for HttpBranchInvoker {
 #[async_trait]
 impl BranchInvoker for HttpBranchInvoker {
     async fn invoke(&self, url: &str, payload: &serde_json::Value) -> anyhow::Result<()> {
+        self.invoke_with_options(url, payload, &TransactionOptions::default())
+            .await
+    }
+
+    async fn invoke_with_options(
+        &self,
+        url: &str,
+        payload: &serde_json::Value,
+        options: &TransactionOptions,
+    ) -> anyhow::Result<()> {
         self.url_policy.validate(url)?;
-        let response = self.client.post(url).json(payload).send().await?;
+        options.validate()?;
+        let mut request = self.client.post(url).json(payload);
+        if let Some(timeout) = options.request_timeout_millis {
+            request = request.timeout(Duration::from_millis(timeout));
+        }
+        for (name, value) in &options.branch_headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        let response = request.send().await?;
         if response.status().is_success() {
             Ok(())
         } else {
@@ -1794,6 +1870,7 @@ where
 
     pub async fn submit(&self, tx: Transaction) -> anyhow::Result<Transaction> {
         let mut tx = tx;
+        tx.options.validate()?;
         if tx.kind == TransactionKind::Message {
             self.expand_message_topics(&mut tx).await?;
         }
@@ -1853,6 +1930,93 @@ where
         self.store.register_branch(gid, branch).await
     }
 
+    /// Validates that a transaction can be submitted by the lifecycle-managed
+    /// recovery worker without performing branch I/O in the caller's request.
+    pub async fn schedule_submit(&self, gid: &str) -> anyhow::Result<Transaction> {
+        let mut tx = self
+            .store
+            .get_transaction(gid)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        if tx.status == TransactionStatus::Succeeded {
+            return Ok(tx);
+        }
+        let allowed = match tx.kind {
+            TransactionKind::Tcc | TransactionKind::Xa => {
+                &[TransactionStatus::Prepared, TransactionStatus::Succeeding][..]
+            }
+            TransactionKind::Saga => {
+                &[TransactionStatus::Submitted, TransactionStatus::Succeeding][..]
+            }
+            TransactionKind::Workflow => &[
+                TransactionStatus::Submitted,
+                TransactionStatus::Prepared,
+                TransactionStatus::Succeeding,
+            ][..],
+            TransactionKind::Message => &[
+                TransactionStatus::Submitted,
+                TransactionStatus::Prepared,
+                TransactionStatus::Succeeding,
+            ][..],
+        };
+        ensure_status(&tx, allowed)?;
+        if tx.kind == TransactionKind::Workflow && tx.status == TransactionStatus::Prepared {
+            tx.status = TransactionStatus::Submitted;
+            self.store.update_transaction(tx.clone()).await?;
+        }
+        Ok(tx)
+    }
+
+    /// Persists an abort request so compensation is executed by the recovery
+    /// worker. Message abort has no remote branch I/O and completes inline.
+    pub async fn schedule_abort(&self, gid: &str) -> anyhow::Result<Transaction> {
+        let mut tx = self
+            .store
+            .get_transaction(gid)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        if tx.status == TransactionStatus::Aborted {
+            return Ok(tx);
+        }
+        if tx.kind == TransactionKind::Message {
+            return self.abort_message(gid).await;
+        }
+        let allowed = match tx.kind {
+            TransactionKind::Tcc => &[
+                TransactionStatus::Submitted,
+                TransactionStatus::Trying,
+                TransactionStatus::Prepared,
+                TransactionStatus::Aborting,
+            ][..],
+            TransactionKind::Saga => {
+                &[
+                    TransactionStatus::Submitted,
+                    TransactionStatus::Succeeding,
+                    TransactionStatus::Aborting,
+                ][..]
+            }
+            TransactionKind::Workflow => &[
+                TransactionStatus::Submitted,
+                TransactionStatus::Prepared,
+                TransactionStatus::Succeeding,
+                TransactionStatus::Aborting,
+            ][..],
+            TransactionKind::Xa => &[
+                TransactionStatus::Submitted,
+                TransactionStatus::Prepared,
+                TransactionStatus::Aborting,
+            ][..],
+            TransactionKind::Message => unreachable!("message abort is handled above"),
+        };
+        ensure_status(&tx, allowed)?;
+        tx.status = TransactionStatus::Aborting;
+        for branch in &mut tx.branches {
+            branch.next_retry_millis = None;
+        }
+        self.store.update_transaction(tx.clone()).await?;
+        Ok(tx)
+    }
+
     pub async fn start_saga(&self, gid: &str) -> anyhow::Result<Transaction> {
         let mut tx = self
             .store
@@ -1863,12 +2027,23 @@ where
         if tx.status == TransactionStatus::Succeeded {
             return Ok(tx);
         }
-        ensure_status(&tx, &[TransactionStatus::Submitted])?;
+        ensure_status(
+            &tx,
+            &[TransactionStatus::Submitted, TransactionStatus::Succeeding],
+        )?;
+        let execution_options = tx.options.clone();
+        let max_attempts = execution_options
+            .retry_limit
+            .map(|retries| retries.saturating_add(1))
+            .unwrap_or(1);
         tx.status = TransactionStatus::Succeeding;
         self.store.update_transaction(tx.clone()).await?;
         for index in 0..tx.branches.len() {
+            if tx.branches[index].status == BranchStatus::Succeeded {
+                continue;
+            }
             let barrier = BranchBarrier::new(&tx.gid, &tx.branches[index].id, "action");
-            if self.store.barrier(barrier).await? != BarrierDecision::Execute {
+            if self.store.barrier(barrier.clone()).await? != BarrierDecision::Execute {
                 return self
                     .store
                     .get_transaction(gid)
@@ -1880,7 +2055,7 @@ where
                 branch.status = BranchStatus::Running;
                 branch.attempts = branch.attempts.saturating_add(1);
                 let action = branch.action.clone();
-                self.invoke_branch(branch, &action).await
+                self.invoke_branch(&execution_options, branch, &action).await
             };
             match action_result {
                 Ok(()) => {
@@ -1889,6 +2064,12 @@ where
                     branch.next_retry_millis = None;
                 }
                 Err(_) => {
+                    if tx.branches[index].attempts < max_attempts {
+                        tx.branches[index].status = BranchStatus::Failed;
+                        self.store.release_barrier(&barrier).await?;
+                        self.store.update_transaction(tx.clone()).await?;
+                        return Ok(tx);
+                    }
                     tx.branches[index].status = BranchStatus::Compensating;
                     tx.status = TransactionStatus::Aborting;
                     for previous in &mut tx.branches {
@@ -1919,8 +2100,13 @@ where
         }
         ensure_status(
             &tx,
-            &[TransactionStatus::Submitted, TransactionStatus::Aborting],
+            &[
+                TransactionStatus::Submitted,
+                TransactionStatus::Succeeding,
+                TransactionStatus::Aborting,
+            ],
         )?;
+        let execution_options = tx.options.clone();
         tx.status = TransactionStatus::Aborting;
         for branch in tx.branches.iter_mut().rev() {
             if branch.status == BranchStatus::Pending {
@@ -1939,7 +2125,11 @@ where
                 BarrierDecision::Execute => {
                     if let Some(compensate) = branch.compensate.clone() {
                         branch.attempts = branch.attempts.saturating_add(1);
-                        if self.invoke_url(branch, &compensate).await.is_err() {
+                        if self
+                            .invoke_url(&execution_options, branch, &compensate)
+                            .await
+                            .is_err()
+                        {
                             branch.status = BranchStatus::Compensating;
                             self.store.release_barrier(&barrier).await?;
                             self.store.update_transaction(tx.clone()).await?;
@@ -1980,6 +2170,8 @@ where
             &tx,
             &[TransactionStatus::Submitted, TransactionStatus::Trying],
         )?;
+        let execution_options = tx.options.clone();
+        let max_attempts = self.max_attempts(&execution_options);
         tx.status = TransactionStatus::Trying;
         for branch in &mut tx.branches {
             if branch.status == BranchStatus::Succeeded {
@@ -1992,7 +2184,10 @@ where
                     branch.status = BranchStatus::Running;
                     branch.attempts = branch.attempts.saturating_add(1);
                     let action = branch.action.clone();
-                    match self.invoke_branch(branch, &action).await {
+                    match self
+                        .invoke_branch(&execution_options, branch, &action)
+                        .await
+                    {
                         Ok(()) => {
                             branch.status = BranchStatus::Succeeded;
                             branch.next_retry_millis = None;
@@ -2000,7 +2195,7 @@ where
                         Err(_) => {
                             branch.status = BranchStatus::Failed;
                             self.store.release_barrier(&barrier).await?;
-                            if branch.attempts >= self.options.max_attempts {
+                            if branch.attempts >= max_attempts {
                                 tx.status = TransactionStatus::Aborting;
                             }
                             self.store.update_transaction(tx.clone()).await?;
@@ -2040,6 +2235,7 @@ where
             &tx,
             &[TransactionStatus::Prepared, TransactionStatus::Succeeding],
         )?;
+        let execution_options = tx.options.clone();
         tx.status = TransactionStatus::Succeeding;
         for branch in &mut tx.branches {
             let barrier = BranchBarrier::new(&tx.gid, &branch.id, "confirm");
@@ -2049,7 +2245,10 @@ where
                     anyhow::anyhow!("missing confirm action for branch {}", branch.id)
                 })?;
                 branch.attempts = branch.attempts.saturating_add(1);
-                match self.invoke_url(branch, &confirm).await {
+                match self
+                    .invoke_url(&execution_options, branch, &confirm)
+                    .await
+                {
                     Ok(()) => {
                         branch.status = BranchStatus::Succeeded;
                         branch.next_retry_millis = None;
@@ -2087,6 +2286,7 @@ where
                 TransactionStatus::Aborting,
             ],
         )?;
+        let execution_options = tx.options.clone();
         tx.status = TransactionStatus::Aborting;
         for branch in &mut tx.branches {
             let barrier = BranchBarrier::new(&tx.gid, &branch.id, "cancel");
@@ -2100,7 +2300,10 @@ where
                             anyhow::anyhow!("missing cancel action for branch {}", branch.id)
                         })?;
                     branch.attempts = branch.attempts.saturating_add(1);
-                    match self.invoke_url(branch, &cancel).await {
+                    match self
+                        .invoke_url(&execution_options, branch, &cancel)
+                        .await
+                    {
                         Ok(()) => {
                             branch.status = BranchStatus::Skipped;
                             branch.next_retry_millis = None;
@@ -2169,6 +2372,7 @@ where
                 TransactionStatus::Succeeding,
             ],
         )?;
+        let execution_options = tx.options.clone();
         tx.status = TransactionStatus::Succeeding;
         loop {
             let succeeded = tx
@@ -2199,7 +2403,7 @@ where
             tx.branches[index].status = BranchStatus::Running;
             tx.branches[index].attempts = tx.branches[index].attempts.saturating_add(1);
             if self
-                .invoke_branch(&mut tx.branches[index], &action)
+                .invoke_branch(&execution_options, &mut tx.branches[index], &action)
                 .await
                 .is_err()
             {
@@ -2241,6 +2445,7 @@ where
                 TransactionStatus::Aborting,
             ],
         )?;
+        let execution_options = tx.options.clone();
         tx.status = TransactionStatus::Aborting;
         for branch in tx.branches.iter_mut().rev() {
             if branch.status != BranchStatus::Succeeded {
@@ -2255,7 +2460,11 @@ where
                     anyhow::anyhow!("missing workflow compensation URL for {}", branch.id)
                 })?;
                 branch.attempts = branch.attempts.saturating_add(1);
-                if self.invoke_url(branch, &compensate).await.is_err() {
+                if self
+                    .invoke_url(&execution_options, branch, &compensate)
+                    .await
+                    .is_err()
+                {
                     branch.status = BranchStatus::Compensating;
                     self.store.release_barrier(&barrier).await?;
                     self.store.update_transaction(tx.clone()).await?;
@@ -2285,6 +2494,7 @@ where
                 TransactionStatus::Succeeding,
             ],
         )?;
+        let execution_options = tx.options.clone();
         tx.status = TransactionStatus::Succeeding;
         for branch in &mut tx.branches {
             if branch.status == BranchStatus::Succeeded {
@@ -2295,7 +2505,11 @@ where
                 branch.status = BranchStatus::Running;
                 branch.attempts = branch.attempts.saturating_add(1);
                 let action = branch.action.clone();
-                if self.invoke_branch(branch, &action).await.is_err() {
+                if self
+                    .invoke_branch(&execution_options, branch, &action)
+                    .await
+                    .is_err()
+                {
                     branch.status = BranchStatus::Failed;
                     self.store.release_barrier(&barrier).await?;
                     self.store.update_transaction(tx.clone()).await?;
@@ -2350,6 +2564,7 @@ where
             &tx,
             &[TransactionStatus::Prepared, TransactionStatus::Succeeding],
         )?;
+        let execution_options = tx.options.clone();
         tx.status = TransactionStatus::Succeeding;
         for branch in &mut tx.branches {
             let barrier = BranchBarrier::new(&tx.gid, &branch.id, "commit");
@@ -2359,7 +2574,11 @@ where
                     .clone()
                     .ok_or_else(|| anyhow::anyhow!("missing XA commit URL for {}", branch.id))?;
                 branch.attempts = branch.attempts.saturating_add(1);
-                if self.invoke_url(branch, &commit).await.is_err() {
+                if self
+                    .invoke_url(&execution_options, branch, &commit)
+                    .await
+                    .is_err()
+                {
                     branch.status = BranchStatus::Failed;
                     self.store.release_barrier(&barrier).await?;
                     self.store.update_transaction(tx.clone()).await?;
@@ -2387,6 +2606,7 @@ where
                 TransactionStatus::Aborting,
             ],
         )?;
+        let execution_options = tx.options.clone();
         tx.status = TransactionStatus::Aborting;
         for branch in &mut tx.branches {
             let barrier = BranchBarrier::new(&tx.gid, &branch.id, "rollback");
@@ -2396,7 +2616,11 @@ where
                     .clone()
                     .ok_or_else(|| anyhow::anyhow!("missing XA rollback URL for {}", branch.id))?;
                 branch.attempts = branch.attempts.saturating_add(1);
-                if self.invoke_url(branch, &rollback).await.is_err() {
+                if self
+                    .invoke_url(&execution_options, branch, &rollback)
+                    .await
+                    .is_err()
+                {
                     branch.status = BranchStatus::Failed;
                     self.store.release_barrier(&barrier).await?;
                     self.store.update_transaction(tx.clone()).await?;
@@ -2513,7 +2737,10 @@ where
                 self.confirm_tcc(gid).await
             }
             (TransactionKind::Tcc, TransactionStatus::Aborting) => self.cancel_tcc(gid).await,
-            (TransactionKind::Saga, TransactionStatus::Submitted) => self.start_saga(gid).await,
+            (
+                TransactionKind::Saga,
+                TransactionStatus::Submitted | TransactionStatus::Succeeding,
+            ) => self.start_saga(gid).await,
             (TransactionKind::Saga, TransactionStatus::Aborting) => self.abort_saga(gid).await,
             (
                 TransactionKind::Workflow,
@@ -2577,7 +2804,10 @@ where
                 (TransactionKind::Tcc, TransactionStatus::Aborting) => {
                     self.cancel_tcc(&tx.gid).await?
                 }
-                (TransactionKind::Saga, TransactionStatus::Submitted) => {
+                (
+                    TransactionKind::Saga,
+                    TransactionStatus::Submitted | TransactionStatus::Succeeding,
+                ) => {
                     self.start_saga(&tx.gid).await?
                 }
                 (TransactionKind::Saga, TransactionStatus::Aborting) => {
@@ -2629,23 +2859,49 @@ where
         self.tick_recover_once().await
     }
 
-    async fn invoke_branch(&self, branch: &mut Branch, url: &str) -> anyhow::Result<()> {
-        match self.invoker.invoke(url, &branch.payload).await {
+    fn max_attempts(&self, options: &TransactionOptions) -> u32 {
+        options
+            .retry_limit
+            .map(|retries| retries.saturating_add(1))
+            .unwrap_or(self.options.max_attempts)
+    }
+
+    async fn invoke_branch(
+        &self,
+        options: &TransactionOptions,
+        branch: &mut Branch,
+        url: &str,
+    ) -> anyhow::Result<()> {
+        match self
+            .invoker
+            .invoke_with_options(url, &branch.payload, options)
+            .await
+        {
             Ok(()) => Ok(()),
             Err(_) => {
+                let retry_backoff_millis = options
+                    .retry_interval_millis
+                    .unwrap_or(self.options.retry_backoff_millis);
                 record_branch_failure(
                     branch,
                     "branch_call_failed".to_string(),
-                    self.options.retry_backoff_millis,
-                    self.options.max_retry_backoff_millis,
+                    retry_backoff_millis,
+                    self.options
+                        .max_retry_backoff_millis
+                        .max(retry_backoff_millis),
                 );
                 Err(anyhow::anyhow!("branch call failed"))
             }
         }
     }
 
-    async fn invoke_url(&self, branch: &mut Branch, url: &str) -> anyhow::Result<()> {
-        self.invoke_branch(branch, url).await
+    async fn invoke_url(
+        &self,
+        options: &TransactionOptions,
+        branch: &mut Branch,
+        url: &str,
+    ) -> anyhow::Result<()> {
+        self.invoke_branch(options, branch, url).await
     }
 }
 
@@ -2823,7 +3079,7 @@ mod tests {
         collections::BTreeMap,
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Arc,
+            Arc, Mutex,
         },
     };
 
@@ -2842,6 +3098,11 @@ mod tests {
     struct FailOnCallsInvoker {
         calls: Arc<AtomicUsize>,
         fail_on: Arc<BTreeSet<usize>>,
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingOptionsInvoker {
+        options: Arc<Mutex<Option<TransactionOptions>>>,
     }
 
     #[async_trait]
@@ -2877,6 +3138,23 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl BranchInvoker for RecordingOptionsInvoker {
+        async fn invoke(&self, _url: &str, _payload: &serde_json::Value) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn invoke_with_options(
+            &self,
+            _url: &str,
+            _payload: &serde_json::Value,
+            options: &TransactionOptions,
+        ) -> anyhow::Result<()> {
+            *self.options.lock().expect("recording options lock") = Some(options.clone());
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn saga_can_submit_and_abort_with_compensation_barriers() {
         let dtm = Dtm::new(InMemoryTransactionStore::new());
@@ -2895,6 +3173,75 @@ mod tests {
 
         assert_eq!(aborted.status, TransactionStatus::Aborted);
         assert_eq!(aborted.branches[0].status, BranchStatus::Skipped);
+    }
+
+    #[tokio::test]
+    async fn saga_uses_transaction_retry_limit_during_recovery() {
+        let dtm = Dtm::with_options(
+            InMemoryTransactionStore::new(),
+            FailingOnceInvoker {
+                calls: Arc::new(AtomicUsize::new(0)),
+            },
+            DtmOptions {
+                retry_backoff_millis: 100,
+                ..DtmOptions::default()
+            },
+        );
+        let mut transaction = Transaction::saga(
+            "gid-saga-retry-limit",
+            vec![Branch::saga(
+                "b1",
+                "action",
+                "compensate",
+                serde_json::json!({}),
+            )],
+        );
+        transaction.options.retry_limit = Some(1);
+        transaction.options.retry_interval_millis = Some(1);
+        dtm.submit(transaction).await.expect("submit");
+
+        let retrying = dtm
+            .start_saga("gid-saga-retry-limit")
+            .await
+            .expect("first attempt");
+        assert_eq!(retrying.status, TransactionStatus::Succeeding);
+        assert_eq!(retrying.branches[0].status, BranchStatus::Failed);
+
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let recovered = dtm.tick_recover_once().await.expect("retry");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].status, TransactionStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn branch_invoker_receives_transaction_options() {
+        let invoker = RecordingOptionsInvoker::default();
+        let recorded = Arc::clone(&invoker.options);
+        let dtm = Dtm::with_invoker(InMemoryTransactionStore::new(), invoker);
+        let mut transaction = Transaction::saga(
+            "gid-options",
+            vec![Branch::saga(
+                "b1",
+                "action",
+                "compensate",
+                serde_json::json!({}),
+            )],
+        );
+        transaction.options.request_timeout_millis = Some(2_000);
+        transaction.options.branch_headers.insert(
+            "x-transaction".to_owned(),
+            "transaction-a".to_owned(),
+        );
+        dtm.submit(transaction).await.expect("submit");
+        dtm.start_saga("gid-options").await.expect("start");
+
+        let options = recorded
+            .lock()
+            .expect("recording options lock")
+            .clone()
+            .expect("recorded options");
+        assert_eq!(options.request_timeout_millis, Some(2_000));
+        assert_eq!(options.branch_headers["x-transaction"], "transaction-a");
     }
 
     #[tokio::test]
@@ -3201,6 +3548,66 @@ mod tests {
             .await
             .expect("terminal transaction");
         assert_eq!(unchanged.status, TransactionStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn scheduled_workflow_submit_is_advanced_by_recovery() {
+        let dtm = Dtm::new(InMemoryTransactionStore::new());
+        dtm.submit(Transaction::workflow("gid-workflow-async", Vec::new()))
+            .await
+            .expect("submit");
+        dtm.prepare_workflow("gid-workflow-async")
+            .await
+            .expect("prepare");
+
+        let scheduled = dtm
+            .schedule_submit("gid-workflow-async")
+            .await
+            .expect("schedule submit");
+        assert_eq!(scheduled.status, TransactionStatus::Submitted);
+
+        let recovered = dtm.tick_recover_once().await.expect("recover");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].status, TransactionStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn scheduled_abort_is_persisted_before_compensation() {
+        let dtm = Dtm::new(InMemoryTransactionStore::new());
+        dtm.submit(Transaction::saga("gid-saga-async-abort", Vec::new()))
+            .await
+            .expect("submit");
+
+        let scheduled = dtm
+            .schedule_abort("gid-saga-async-abort")
+            .await
+            .expect("schedule abort");
+        assert_eq!(scheduled.status, TransactionStatus::Aborting);
+
+        let persisted = dtm
+            .store()
+            .get_transaction("gid-saga-async-abort")
+            .await
+            .expect("get transaction")
+            .expect("transaction");
+        assert_eq!(persisted.status, TransactionStatus::Aborting);
+
+        let recovered = dtm.tick_recover_once().await.expect("recover");
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].status, TransactionStatus::Aborted);
+    }
+
+    #[tokio::test]
+    async fn scheduled_tcc_submit_requires_prepare() {
+        let dtm = Dtm::new(InMemoryTransactionStore::new());
+        dtm.submit(Transaction::tcc("gid-tcc-not-prepared", Vec::new()))
+            .await
+            .expect("submit");
+
+        assert!(dtm
+            .schedule_submit("gid-tcc-not-prepared")
+            .await
+            .is_err());
     }
 
     #[tokio::test]

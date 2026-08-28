@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
-use crate::{BranchKind, KvEntry, Transaction, TransactionKind};
+use crate::{BranchKind, KvEntry, Transaction, TransactionKind, TransactionOptions};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateBranchRequest {
@@ -33,6 +33,8 @@ pub struct CreateTransactionRequest {
     pub timeout_millis: Option<u64>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    pub options: TransactionOptions,
 }
 
 #[derive(Debug, Clone)]

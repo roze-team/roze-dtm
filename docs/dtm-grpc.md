@@ -41,4 +41,4 @@ rpc:
 
 二进制 payload 会优先按 JSON 解码；无法解码时保留为 JSON 字节数组。当前 HTTP 分支调用器发送 JSON，因此需要原始 protobuf 二进制业务载荷的调用方应在业务适配层显式编码。
 
-`CustomedData`、`QueryPrepared`、`ReqExtra`、`BranchHeaders` 以及非零重试/请求选项会保存在事务 metadata 中，避免跨协议转换时丢失。当前核心执行器仍使用服务级重试策略，尚未把逐事务 `RetryInterval`、`RetryLimit`、`RequestTimeout` 和自定义分支 Header 应用到实际分支调用；回调式 Workflow 的动态进度注册也仍在路线图中。
+`CustomedData`、`QueryPrepared` 和 `ReqExtra` 会保存在事务 metadata 中，避免跨协议转换时丢失。`RetryInterval`、`RequestTimeout` 按上游合同以秒接收并转换为毫秒，`RetryLimit` 和 `BranchHeaders` 进入持久化 `TransactionOptions`：HTTP 分支调用会应用逐事务 timeout 和 Header，失败恢复使用逐事务初始退避，Saga 在重试次数耗尽后进入补偿。`WaitResult=false` 时，Submit/Abort 在完成状态校验和持久化调度后立即返回，实际分支调用由带租约的恢复 worker 推进；`WaitResult=true` 保持同步等待。Prepare 始终同步完成持久化阶段。回调式 Workflow 的动态进度注册仍在路线图中。

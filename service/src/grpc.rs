@@ -308,6 +308,8 @@ mod tests {
             trans_options: Some(pb::dtmgimp::DtmTransOptions {
                 timeout_to_fail: 30,
                 retry_interval: 5,
+                request_timeout: 2,
+                retry_limit: 7,
                 branch_headers: [("x-tenant".to_owned(), "tenant-a".to_owned())]
                     .into_iter()
                     .collect(),
@@ -331,6 +333,16 @@ mod tests {
         assert_eq!(converted.retry_interval, Some(5));
         assert_eq!(converted.branch_headers["x-tenant"], "tenant-a");
         assert_eq!(converted.req_extra["status"], "submitted");
+        let transaction = crate::compat_transaction(
+            roze_dtm::TransactionKind::Saga,
+            &converted,
+            &roze_dtm::BranchUrlPolicy::allow_all(),
+        )
+        .expect("build transaction");
+        assert_eq!(transaction.options.retry_interval_millis, Some(5_000));
+        assert_eq!(transaction.options.request_timeout_millis, Some(2_000));
+        assert_eq!(transaction.options.retry_limit, Some(7));
+        assert_eq!(transaction.options.branch_headers["x-tenant"], "tenant-a");
     }
 
     #[test]

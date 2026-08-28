@@ -14,7 +14,8 @@ use http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use roze_dtm::{
     Branch, BranchKind, BranchStatus, BranchUrlPolicy, Dtm, DtmOptions, HttpBranchInvoker,
     InMemoryTransactionStore, MySqlTransactionStore, PostgresTransactionStore,
-    SqliteTransactionStore, Transaction, TransactionKind, TransactionStatus, TransactionStore,
+    SqliteTransactionStore, Transaction, TransactionKind, TransactionOptions, TransactionStatus,
+    TransactionStore,
 };
 use roze_http::{
     rest::{self, HttpResponse, RestServer, RestService},
@@ -229,6 +230,8 @@ struct SubmitTransactionRequest {
     timeout_millis: Option<u64>,
     #[serde(default)]
     metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    options: TransactionOptions,
 }
 
 #[derive(Deserialize)]
@@ -976,6 +979,7 @@ async fn compat_apply(
 ) -> anyhow::Result<Transaction> {
     let kind = parse_kind(&request.trans_type).map_err(anyhow::Error::msg)?;
     let gid = request.gid.trim().to_owned();
+    let wait_result = request.wait_result;
     anyhow::ensure!(!gid.is_empty() && gid.len() <= 128, "invalid gid");
     let existing = state.dtm.store().get_transaction(&gid).await?;
     if existing.is_none() {
@@ -988,6 +992,13 @@ async fn compat_apply(
             transaction.metadata.insert("rollback_reason".to_string(), reason);
         }
         state.dtm.submit(transaction).await?;
+    }
+    if !wait_result {
+        match operation {
+            CompatOperation::Submit => return state.dtm.schedule_submit(&gid).await,
+            CompatOperation::Abort => return state.dtm.schedule_abort(&gid).await,
+            CompatOperation::Prepare => {}
+        }
     }
     match (kind, operation) {
         (TransactionKind::Tcc, CompatOperation::Prepare) => state.dtm.prepare_tcc(&gid).await,
@@ -1233,13 +1244,33 @@ fn compat_transaction(
         };
         branches.push(branch);
     }
-    match kind {
-        TransactionKind::Tcc => Ok(Transaction::tcc(&request.gid, Vec::new())),
-        TransactionKind::Xa => Ok(Transaction::xa(&request.gid, Vec::new())),
-        TransactionKind::Saga => Ok(Transaction::saga(&request.gid, branches)),
-        TransactionKind::Workflow => Ok(Transaction::workflow(&request.gid, branches)),
-        TransactionKind::Message => Ok(Transaction::message(&request.gid, branches)),
-    }
+    let mut transaction = match kind {
+        TransactionKind::Tcc => Transaction::tcc(&request.gid, Vec::new()),
+        TransactionKind::Xa => Transaction::xa(&request.gid, Vec::new()),
+        TransactionKind::Saga => Transaction::saga(&request.gid, branches),
+        TransactionKind::Workflow => Transaction::workflow(&request.gid, branches),
+        TransactionKind::Message => Transaction::message(&request.gid, branches),
+    };
+    transaction.options = compat_transaction_options(request)?;
+    Ok(transaction)
+}
+
+fn compat_transaction_options(
+    request: &CompatTransactionRequest,
+) -> anyhow::Result<TransactionOptions> {
+    let options = TransactionOptions {
+        wait_result: request.wait_result,
+        retry_interval_millis: request
+            .retry_interval
+            .map(|seconds| seconds.saturating_mul(1_000)),
+        request_timeout_millis: request
+            .request_timeout
+            .map(|seconds| seconds.saturating_mul(1_000)),
+        retry_limit: request.retry_limit.map(u32::try_from).transpose()?,
+        branch_headers: request.branch_headers.clone(),
+    };
+    options.validate()?;
+    Ok(options)
 }
 
 async fn ready(State(state): State<ControlState>) -> HttpResponse {
@@ -1574,6 +1605,10 @@ fn build_transaction(
     }
     let mut transaction = Transaction::new(gid, kind, branches);
     transaction.metadata = request.metadata;
+    if request.options.validate().is_err() {
+        return Err("transaction options are invalid");
+    }
+    transaction.options = request.options;
     if let Some(timeout) = request.timeout_millis {
         if !(1_000..=86_400_000).contains(&timeout) {
             return Err("timeout_millis must be between 1000 and 86400000");
@@ -1860,6 +1895,7 @@ mod tests {
             }],
             timeout_millis: Some(30_000),
             metadata: BTreeMap::new(),
+            options: TransactionOptions::default(),
         };
         let policy = BranchUrlPolicy::from_allowed_origins(["http://inventory"]).expect("policy");
         let transaction =
@@ -1874,6 +1910,7 @@ mod tests {
             branches: Vec::new(),
             timeout_millis: None,
             metadata: BTreeMap::new(),
+            options: TransactionOptions::default(),
         };
         assert!(build_transaction(TransactionKind::Tcc, request, &policy).is_err());
 
@@ -1892,6 +1929,7 @@ mod tests {
             }],
             timeout_millis: None,
             metadata: BTreeMap::new(),
+            options: TransactionOptions::default(),
         };
         assert!(build_transaction(TransactionKind::Tcc, request, &policy).is_err());
 
@@ -1910,6 +1948,7 @@ mod tests {
             }],
             timeout_millis: None,
             metadata: BTreeMap::new(),
+            options: TransactionOptions::default(),
         };
         assert!(build_transaction(TransactionKind::Message, topic_message, &policy).is_ok());
     }

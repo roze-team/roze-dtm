@@ -11,7 +11,7 @@
 | 存储 | 已支持 | Memory、SQLite、PostgreSQL、MySQL |
 | 高可用恢复 | 已支持 | 持久化租约保证同一时刻只有一个恢复 worker 推进事务 |
 | 控制面 | 已支持 | Roze HTTP、数字响应信封、鉴权、健康检查、指标与审计事件 |
-| DTM HTTP/JSON-RPC/gRPC 兼容 | 已支持核心 | HTTP 路由、JSON-RPC、原子分支注册、管理操作及 9 个 gRPC 方法；逐事务选项执行语义和 gRPC 互操作待补 |
+| DTM HTTP/JSON-RPC/gRPC 兼容 | 已支持核心 | 9 个 gRPC 方法、逐事务 timeout/retry/Header 及 WaitResult 异步调度；gRPC 互操作待补 |
 | XA | 部分支持 | 已有 Prepare/Commit/Rollback 与动态分支；资源管理器 SQL 助手和启发式结果待补 |
 | 二阶段消息 | 已支持核心 | Prepared/Dispatch/Abort，并复用 `roze-transaction` Outbox/Inbox 与 `roze-mq` |
 | Topic/KV | 已支持核心 | 通用版本化 KV、订阅增删查、HTTP 兼容端点与 `topic://` 消息分支展开 |

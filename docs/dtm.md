@@ -77,6 +77,12 @@ Authorization: Bearer <ROZE_DTM_CONTROL_TOKEN>
   "gid": "order-1001",
   "timeout_millis": 60000,
   "metadata": { "tenant": "tenant-1" },
+  "options": {
+    "request_timeout_millis": 3000,
+    "retry_interval_millis": 1000,
+    "retry_limit": 3,
+    "branch_headers": { "x-tenant": "tenant-1" }
+  },
   "branches": [
     {
       "id": "inventory",
@@ -91,6 +97,8 @@ Authorization: Bearer <ROZE_DTM_CONTROL_TOKEN>
 ```
 
 `kind` 可省略；TCC 端点只接受 `TccTry` 分支。每个分支必须提供合法的 HTTP(S) Try、Confirm 和 Cancel 地址。
+
+原生 HTTP API 的逐事务选项使用毫秒。`request_timeout_millis` 覆盖该事务的单次 HTTP 分支调用超时；`retry_interval_millis` 是有上限指数退避的初始间隔；`retry_limit` 表示额外重试次数，Saga 在耗尽后才进入补偿，TCC Try 使用同一总尝试次数边界；`branch_headers` 会在 URL 白名单再次校验后发送给分支。Header 最多 32 个，名称和值分别不超过 64 和 1024 字节，并必须是合法 HTTP Header。
 
 ## Saga 请求
 
@@ -118,6 +126,7 @@ Saga 端点只接受 `SagaAction` 分支，并要求补偿地址。
 - 分支 URL 最长 2048 字节，只接受 `http://` 或 `https://`。
 - metadata 最多 32 项；键最长 64 字节，值最长 256 字节。
 - `timeout_millis` 范围为 1 秒至 24 小时。
+- 逐事务重试和请求超时范围为 1 毫秒至 24 小时，重试次数不超过 10000。
 - 原生 JSON 提取器默认限制请求体为 2 MiB。
 
 ## 状态恢复与屏障
