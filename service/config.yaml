@@ -17,6 +17,9 @@ rest:
   addr: 127.0.0.1:8090
   register: false
 
+rpc:
+  addr: 127.0.0.1:36790
+
 governance: {}
 
 application:
@@ -39,4 +42,3 @@ application:
     max_retry_backoff_ms: 30000
     branch_call_timeout_ms: 5000
     transaction_timeout_ms: 60000
-

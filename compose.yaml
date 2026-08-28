@@ -24,6 +24,7 @@ services:
       ROZE_DTM_DATABASE_URL: postgres://roze:roze-dtm-local@postgres:5432/roze_dtm
     ports:
       - "8090:8090"
+      - "36790:36790"
 
 volumes:
   postgres-data:

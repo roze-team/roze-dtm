@@ -4,6 +4,8 @@ syntax = "proto3";
 
 package dtmgimp;
 
+option go_package = "./dtmgpb";
+
 import "google/protobuf/empty.proto";
 
 service Dtm {

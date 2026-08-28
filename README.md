@@ -6,7 +6,8 @@ Roze 的独立分布式事务协调器，默认提供 TCC，并支持 Saga 工�
 
 - `src/lib.rs`：DTM 核心库，包含 TCC/Saga 状态机、内存、SQLite、PostgreSQL、MySQL 存储、HTTP 分支调用和恢复逻辑。
 - `service/`：独立控制面服务。
-- `proto/dtmgimp.proto`：与 dtm-labs/dtm 保持字段号兼容的 gRPC 协议合同；服务端适配器尚未启用。
+- `proto/dtmgimp.proto`：与 dtm-labs/dtm 保持字段号兼容的 gRPC 协议合同和生成边界。
+- `docs/dtm-grpc.md`：Roze gRPC 生命周期、鉴权、健康检查和客户端契约。
 - `service/config.yaml`：开发环境示例配置，也是服务的默认配置。
 - `docs/dtm.md`：API、部署与安全契约。
 - `docs/roadmap.md`：参考 dtm-labs/dtm 的能力矩阵与 Roze 实施顺序。
@@ -46,7 +47,7 @@ cargo run -p roze-dtm-service
 docker compose up --build
 ```
 
-服务启动后监听 `http://127.0.0.1:8090`。Compose 中的令牌和数据库密码仅用于本地演示，部署前必须替换。生产配置模板位于 `service/config.production.yaml`。
+服务默认监听 HTTP `http://127.0.0.1:8090` 和 gRPC `127.0.0.1:36790`。Compose 中的令牌和数据库密码仅用于本地演示，部署前必须替换。生产配置模板位于 `service/config.production.yaml`。
 
 ## 存储后端
 
@@ -63,7 +64,7 @@ docker compose up --build
 
 ## Rust 客户端
 
-核心 crate 提供 `roze_dtm::client::DtmHttpClient`，支持提交五类事务、调用状态转换、查询事务和获取兼容 GID。客户端拒绝非 HTTP(S) 服务地址且不跟随重定向；生产环境应配置 Bearer token。
+核心 crate 提供 `roze_dtm::client::DtmHttpClient` 和 `roze_dtm::grpc_client::DtmGrpcClient`。HTTP 客户端支持提交五类事务、状态转换、事务查询、topic/KV 和兼容 GID；gRPC 客户端覆盖 `dtmgimp.Dtm` 全部方法并传播 Roze Context。生产环境应配置 Bearer token。
 
 ## 上游同步
 

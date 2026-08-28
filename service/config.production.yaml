@@ -17,6 +17,9 @@ rest:
   addr: 0.0.0.0:8090
   register: false
 
+rpc:
+  addr: 0.0.0.0:36790
+
 governance: {}
 
 application:

@@ -8,15 +8,20 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 config.workspace = true
 http.workspace = true
 roze-dtm = { path = ".." }
 roze-config.workspace = true
+roze-context.workspace = true
+roze-error.workspace = true
+roze-grpc.workspace = true
 roze-health.workspace = true
 roze-http.workspace = true
 roze-log.workspace = true
 roze-metrics.workspace = true
 roze-result.workspace = true
+roze-rpc.workspace = true
 roze-service.workspace = true
 roze-sqlx.workspace = true
 serde.workspace = true

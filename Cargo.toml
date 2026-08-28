@@ -20,6 +20,8 @@ anyhow = "1"
 async-trait = "0.1"
 config = { version = "0.15.24", default-features = false, features = ["json", "yaml", "toml"] }
 http = "1"
+prost = "0.14"
+protoc-bin-vendored = "3"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -27,12 +29,18 @@ sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { version = "0.5.3", features = ["limit", "timeout", "util"] }
 tracing = "0.1"
+tonic = { version = "0.14.6", default-features = false, features = ["transport", "codegen"] }
+tonic-prost = "0.14.6"
 roze-config = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
+roze-context = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 roze-health = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
+roze-error = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
+roze-grpc = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 roze-http = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 roze-log = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 roze-metrics = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 roze-result = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
+roze-rpc = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 roze-service = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 roze-sqlx = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 roze-transaction = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
@@ -40,10 +48,20 @@ roze-transaction = { git = "https://github.com/roze-team/roze.git", rev = "21727
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+prost.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
 tracing.workspace = true
+roze-grpc.workspace = true
+roze-context.workspace = true
+roze-rpc.workspace = true
 roze-transaction.workspace = true
+
+[build-dependencies]
+protoc-bin-vendored.workspace = true
+roze-grpc.workspace = true

@@ -15,7 +15,9 @@ use sqlx::{
 use tokio::sync::RwLock;
 
 pub mod client;
+pub mod grpc_client;
 pub mod kv;
+pub mod pb;
 
 pub use kv::{KvEntry, Topic, TopicSubscriber, TOPICS_CATEGORY};
 

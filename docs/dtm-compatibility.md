@@ -42,7 +42,8 @@
 
 - Roze 不接受未列入 `allowed_branch_origins` 的分支 URL，也不跟随重定向。
 - 所有控制操作都有输入上限、统一审计和恢复租约。
-- `proto/dtmgimp.proto` 已固定与上游兼容的 gRPC service、message 和字段号；gRPC 服务端及客户端适配器仍在后续批次中，因此当前不能宣称 gRPC 可用。
+- `proto/dtmgimp.proto` 固定与上游兼容的 gRPC service、message 和字段号；Roze 服务端和 Rust 客户端覆盖全部 9 个 RPC，并共享 HTTP 控制面的存储、鉴权与生命周期。发布前仍需完成禁编译窗口之后的互操作测试。
+- gRPC 事务扩展字段会持久化到 metadata；逐事务重试、请求超时、分支 Header 的执行语义以及回调式 Workflow 动态进度注册尚未接入核心执行器，不能视为上游行为完全等价。
 - Message 分支支持 `topic://name`，提交时从持久化订阅快照展开为一个或多个 HTTP 分支；订阅变化不会改写已经提交的事务。
 - JSON-RPC 始终返回 HTTP 200，并通过标准 `error.code` 表示协议或操作失败；语法错误返回 `-32700`，无效请求返回 `-32600`。
 - `forceStop` 是不可自动恢复的管理操作，只应在确认人工介入后使用。

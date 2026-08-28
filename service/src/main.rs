@@ -7,6 +7,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+mod grpc;
+
 use anyhow::Context as _;
 use http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use roze_dtm::{
@@ -326,6 +328,15 @@ struct CompatTransactionRequest {
     payloads: Vec<serde_json::Value>,
     timeout_to_fail: Option<u64>,
     rollback_reason: Option<String>,
+    #[serde(alias = "customed_data")]
+    custom_data: Option<String>,
+    query_prepared: Option<String>,
+    wait_result: bool,
+    retry_interval: Option<u64>,
+    request_timeout: Option<u64>,
+    retry_limit: Option<u64>,
+    branch_headers: BTreeMap<String, String>,
+    req_extra: BTreeMap<String, String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -359,6 +370,7 @@ async fn main() -> anyhow::Result<()> {
         .rest
         .as_ref()
         .context("roze-dtm requires rest config")?;
+    let rpc = config.rpc.clone();
     let _tracing_guard = roze_log::init_tracing_with_config(&config.service)?;
 
     let store: Arc<dyn TransactionStore> = match config.application.dtm.store.kind {
@@ -427,7 +439,7 @@ async fn main() -> anyhow::Result<()> {
             .map(Arc::<str>::from),
         lifecycle: Some(group.lifecycle()),
     };
-    let service = control_router(state);
+    let service = control_router(state.clone());
     tracing::info!(
         event = roze_log::events::SERVICE_STARTING,
         service = %config.name,
@@ -439,6 +451,65 @@ async fn main() -> anyhow::Result<()> {
         config.name.clone(),
         RestServer::new(addr, service),
     ));
+    if let Some(rpc) = rpc {
+        let rpc_addr = rpc.addr;
+        let rpc_state = state.clone();
+        let health = roze_health::HealthRegistry::new();
+        let health_dtm = Arc::clone(&state.dtm);
+        health.register_dependency("dtm-store", move || {
+            let dtm = Arc::clone(&health_dtm);
+            async move {
+                dtm.store()
+                    .get_transaction("__roze_health__")
+                    .await
+                    .map(|_| ())
+            }
+        });
+        health.mark_ready();
+        let (rpc_health, grpc_health_service) =
+            roze_rpc::health::RpcHealthReporter::new_for::<
+                roze_dtm::pb::dtmgimp::dtm_server::DtmServer<grpc::DtmGrpcService>,
+            >(health);
+        rpc_health.refresh().await;
+        group.add_fn("roze-dtm-grpc", move |shutdown| {
+            let grpc_health_service = grpc_health_service.clone();
+            let rpc_state = rpc_state.clone();
+            async move {
+                tracing::info!(
+                    event = roze_log::events::RPC_SERVER_LISTENING,
+                    protocol = "rpc",
+                    listen_addr = %rpc_addr,
+                    "DTM gRPC server listening"
+                );
+                let routes = roze_grpc::GrpcRouter::new(grpc_health_service).add_service(
+                    roze_dtm::pb::dtmgimp::dtm_server::DtmServer::new(
+                        grpc::DtmGrpcService::new(rpc_state),
+                    ),
+                );
+                roze_rpc::rpc::RpcServer::new(rpc_addr)
+                    .builder()
+                    .serve_with_shutdown(rpc_addr, routes, async move {
+                        shutdown.wait().await;
+                        tracing::info!(
+                            event = roze_log::events::RPC_SERVER_SHUTDOWN_REQUESTED,
+                            protocol = "rpc",
+                            "DTM gRPC shutdown requested"
+                        );
+                    })
+                    .await
+                    .map_err(|error| anyhow::anyhow!("DTM gRPC service failed: {error}"))
+            }
+        });
+        group.add_fn("grpc-health-sync", move |shutdown| {
+            let rpc_health = rpc_health.clone();
+            async move {
+                rpc_health
+                    .run_until(Duration::from_secs(1), shutdown.wait())
+                    .await;
+                Ok(())
+            }
+        });
+    }
     let recovery_interval = Duration::from_millis(config.application.dtm.recover_interval_ms);
     let recovery_lease_ttl_ms = config.application.dtm.recovery_lease_ttl_ms;
     let recovery_worker_id = config.application.dtm.worker_id.clone();
@@ -912,6 +983,7 @@ async fn compat_apply(
         if let Some(seconds) = request.timeout_to_fail {
             transaction.timeout_millis = Some(seconds.saturating_mul(1_000));
         }
+        preserve_compat_metadata(&mut transaction, &request)?;
         if let Some(reason) = request.rollback_reason {
             transaction.metadata.insert("rollback_reason".to_string(), reason);
         }
@@ -941,6 +1013,52 @@ async fn compat_apply(
             .await?
             .context("transaction not found"),
     }
+}
+
+fn preserve_compat_metadata(
+    transaction: &mut Transaction,
+    request: &CompatTransactionRequest,
+) -> anyhow::Result<()> {
+    if let Some(value) = request.custom_data.as_deref().filter(|value| !value.is_empty()) {
+        transaction
+            .metadata
+            .insert("dtm.custom_data".to_owned(), value.to_owned());
+    }
+    if let Some(value) = request
+        .query_prepared
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        transaction
+            .metadata
+            .insert("dtm.query_prepared".to_owned(), value.to_owned());
+    }
+    transaction.metadata.insert(
+        "dtm.wait_result".to_owned(),
+        request.wait_result.to_string(),
+    );
+    for (key, value) in [
+        ("dtm.retry_interval", request.retry_interval),
+        ("dtm.request_timeout", request.request_timeout),
+        ("dtm.retry_limit", request.retry_limit),
+    ] {
+        if let Some(value) = value {
+            transaction.metadata.insert(key.to_owned(), value.to_string());
+        }
+    }
+    if !request.branch_headers.is_empty() {
+        transaction.metadata.insert(
+            "dtm.branch_headers".to_owned(),
+            serde_json::to_string(&request.branch_headers)?,
+        );
+    }
+    if !request.req_extra.is_empty() {
+        transaction.metadata.insert(
+            "dtm.req_extra".to_owned(),
+            serde_json::to_string(&request.req_extra)?,
+        );
+    }
+    Ok(())
 }
 
 async fn compat_register_branch(
