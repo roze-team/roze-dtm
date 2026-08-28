@@ -34,7 +34,7 @@ bash scripts/redis-integration.sh
 
 HTTP、JSON-RPC 和 gRPC 兼容协议需要使用固定上游客户端版本执行 TCC、Saga、XA、Message、Workflow 和 callback Workflow 端到端矩阵。callback 还必须覆盖 HTTP `409/425`、JSON-RPC `-32901/-32902`、gRPC `ABORTED/FAILED_PRECONDITION`、TLS、超时和客户端在 callback 内提交终态的并发竞争。
 
-当前状态：protobuf、OpenAPI 3.1、Rust/TypeScript/JavaScript 客户端合同和源码测试已存在；OpenAPI 已通过 Router 全覆盖检查及标准规范校验。真实 Go/Rust/TypeScript/JavaScript 跨语言互操作仍未执行。
+当前状态：protobuf、OpenAPI 3.1、Rust/TypeScript/JavaScript 客户端合同和源码测试已存在；`python scripts/validate-compatibility.py` 静态固定 21 条兼容 HTTP/JSON-RPC 路由、9 个 gRPC 方法、proto 字段号、SDK 入口、上游查询 DTO 与 BSD 归属，OpenAPI 也已通过 Router 全覆盖检查及标准规范校验。该门禁不启动服务，不能证明序列化运行结果或真实客户端行为；Go/Rust/TypeScript/JavaScript 跨语言互操作仍未执行。
 
 并发 Saga 的源码合同覆盖依赖 DAG 校验、同层并发、后继等待和逆依赖补偿；HTTP 兼容层映射上游 `custom_data.concurrent/orders`。并发 Message 的源码合同覆盖同时投递、部分失败保留成功结果、仅重试失败分支，以及与延迟投递组合时到期前零调用；HTTP/JSON-RPC 兼容层映射上游请求顶层 `concurrent`。受当前禁编译要求约束，尚未执行这些 Rust 测试及真实分支故障注入，因此新增能力的运行证据仍为 `inconclusive`。
 
