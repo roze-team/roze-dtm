@@ -4009,7 +4009,10 @@ where
         anyhow::ensure!(!tx.status.is_terminal(), "transaction {gid} is terminal");
         let now = current_millis();
         for branch in &mut tx.branches {
-            if matches!(branch.status, BranchStatus::Failed | BranchStatus::Compensating) {
+            if matches!(
+                branch.status,
+                BranchStatus::Failed | BranchStatus::Running | BranchStatus::Compensating
+            ) {
                 branch.next_retry_millis = Some(now);
             }
         }
@@ -4039,6 +4042,38 @@ where
             }
         }
         Ok(reset)
+    }
+
+    /// Resets transactions whose earliest retry is scheduled beyond `after_millis`.
+    ///
+    /// This matches DTM's `resetCronTime` recovery operation without exposing a
+    /// backend-specific cron index. The extra boolean is true only when more
+    /// matching transactions remain after the bounded batch.
+    pub async fn reset_retry_batch_after(
+        &self,
+        after_millis: u64,
+        limit: usize,
+    ) -> anyhow::Result<(Vec<Transaction>, bool)> {
+        let limit = limit.max(1);
+        let cutoff = current_millis().saturating_add(after_millis);
+        let mut candidates = self
+            .store
+            .list_transactions()
+            .await?
+            .into_iter()
+            .filter_map(|transaction| {
+                transaction_next_recovery_millis(&transaction)
+                    .filter(|next| *next > cutoff)
+                    .map(|next| (next, transaction.gid))
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| left.cmp(right));
+        let has_remaining = candidates.len() > limit;
+        let mut reset = Vec::with_capacity(limit.min(candidates.len()));
+        for (_, gid) in candidates.into_iter().take(limit) {
+            reset.push(self.reset_retry(&gid).await?);
+        }
+        Ok((reset, has_remaining))
     }
 
     /// Forces one recoverable transaction through its next state transition.
@@ -4578,6 +4613,30 @@ fn callback_workflow_due(tx: &Transaction, now: u64) -> bool {
         .get("dtm.callback.next_retry_millis")
         .and_then(|value| value.parse::<u64>().ok())
         .is_none_or(|next| next <= now)
+}
+
+fn transaction_next_recovery_millis(tx: &Transaction) -> Option<u64> {
+    if tx.status.is_terminal() {
+        return None;
+    }
+    if is_callback_workflow(tx) {
+        return tx
+            .metadata
+            .get("dtm.callback.next_retry_millis")
+            .and_then(|value| value.parse::<u64>().ok());
+    }
+
+    let mut next = None;
+    for branch in tx.branches.iter().filter(|branch| {
+        matches!(
+            branch.status,
+            BranchStatus::Failed | BranchStatus::Running | BranchStatus::Compensating
+        )
+    }) {
+        let branch_next = branch.next_retry_millis?;
+        next = Some(next.map_or(branch_next, |current: u64| current.min(branch_next)));
+    }
+    next
 }
 
 fn ensure_kind(tx: &Transaction, expected: TransactionKind) -> anyhow::Result<()> {
@@ -5765,6 +5824,61 @@ mod tests {
             .try_acquire_recovery_lease("recovery", "worker-a", 10_000)
             .await
             .expect("renew"));
+    }
+
+    #[tokio::test]
+    async fn reset_retry_batch_after_honors_cutoff_limit_and_remaining_flag() {
+        let store = InMemoryTransactionStore::new();
+        let dtm = Dtm::new(store.clone());
+        let now = current_millis();
+        for (gid, status, next_retry_millis) in [
+            ("retry-near", BranchStatus::Failed, now.saturating_add(500)),
+            (
+                "retry-far-1",
+                BranchStatus::Running,
+                now.saturating_add(10_000),
+            ),
+            (
+                "retry-far-2",
+                BranchStatus::Failed,
+                now.saturating_add(20_000),
+            ),
+        ] {
+            let mut branch = Branch::saga(
+                "01",
+                "http://inventory/action",
+                "http://inventory/compensate",
+                serde_json::json!({}),
+            );
+            branch.status = status;
+            branch.next_retry_millis = Some(next_retry_millis);
+            dtm.submit(Transaction::saga(gid, vec![branch]))
+                .await
+                .expect("submit scheduled retry");
+        }
+
+        let (first, has_remaining) = dtm
+            .reset_retry_batch_after(1_000, 1)
+            .await
+            .expect("first reset batch");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].gid, "retry-far-1");
+        assert!(has_remaining);
+
+        let (second, has_remaining) = dtm
+            .reset_retry_batch_after(1_000, 10)
+            .await
+            .expect("second reset batch");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].gid, "retry-far-2");
+        assert!(!has_remaining);
+
+        let near = store
+            .get_transaction("retry-near")
+            .await
+            .expect("read near retry")
+            .expect("near retry exists");
+        assert_eq!(near.branches[0].next_retry_millis, Some(now.saturating_add(500)));
     }
 
     #[tokio::test]

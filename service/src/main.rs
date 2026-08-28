@@ -269,6 +269,8 @@ struct ControlState {
 
 const DASHBOARD_AUDIT_CAPACITY: usize = 200;
 const DASHBOARD_AUDIT_LIMIT: usize = 50;
+const DEFAULT_COMPAT_RESET_TIMEOUT_SECONDS: u64 = 105;
+const MAX_COMPAT_RESET_TIMEOUT_SECONDS: u64 = 31_536_000;
 
 #[derive(Default)]
 struct DashboardAuditHistory {
@@ -479,7 +481,18 @@ struct CompatQuery {
     #[serde(rename = "transType", alias = "trans_type")]
     trans_type: Option<String>,
     status: Option<String>,
-    position: usize,
+    position: Option<String>,
+    limit: Option<usize>,
+    #[serde(rename = "createTimeStart", alias = "create_time_start")]
+    create_time_start: Option<u64>,
+    #[serde(rename = "createTimeEnd", alias = "create_time_end")]
+    create_time_end: Option<u64>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct CompatResetCronQuery {
+    timeout: Option<u64>,
     limit: Option<usize>,
 }
 
@@ -944,31 +957,78 @@ async fn compat_all(
     if !authorize(&state, &headers) {
         return unauthorized_response();
     }
-    let limit = query.limit.unwrap_or(100).clamp(1, 200);
     match state.dtm.list().await {
-        Ok(transactions) => {
-            let items = transactions
-                .into_iter()
-                .filter(|tx| {
-                    query.gid.as_deref().is_none_or(|gid| tx.gid == gid)
-                        && query
-                            .trans_type
-                            .as_deref()
-                            .is_none_or(|kind| kind_name(tx.kind) == kind)
-                        && query
-                            .status
-                            .as_deref()
-                            .is_none_or(|status| status_name(tx.status) == status)
-                })
-                .skip(query.position)
-                .take(limit)
-                .collect::<Vec<_>>();
-            compat_response(
-                serde_json::json!({"transactions": items, "next_position": query.position + limit, "dtm_result": "SUCCESS"}),
-            )
-        }
+        Ok(transactions) => match build_compat_all_response(transactions, query) {
+            Ok(value) => compat_response(value),
+            Err(message) => compat_failure(message),
+        },
         Err(_) => compat_failure("storage failure"),
     }
+}
+
+fn build_compat_all_response(
+    transactions: Vec<Transaction>,
+    query: CompatQuery,
+) -> Result<serde_json::Value, &'static str> {
+    let limit = query.limit.unwrap_or(100).clamp(1, 200);
+    if query
+        .create_time_start
+        .zip(query.create_time_end)
+        .is_some_and(|(start, end)| start > end)
+    {
+        return Err("createTimeStart must not exceed createTimeEnd");
+    }
+    let mut filtered = transactions
+        .into_iter()
+        .filter(|tx| {
+            query.gid.as_deref().is_none_or(|gid| tx.gid == gid)
+                && query
+                    .trans_type
+                    .as_deref()
+                    .is_none_or(|kind| kind_name(tx.kind) == kind)
+                && query
+                    .status
+                    .as_deref()
+                    .is_none_or(|status| status_name(tx.status) == status)
+                && query
+                    .create_time_start
+                    .is_none_or(|start| tx.created_at_millis >= start)
+                && query
+                    .create_time_end
+                    .is_none_or(|end| tx.created_at_millis <= end)
+        })
+        .collect::<Vec<_>>();
+    filtered.sort_by(|left, right| {
+        right
+            .created_at_millis
+            .cmp(&left.created_at_millis)
+            .then_with(|| right.gid.cmp(&left.gid))
+    });
+    let position = match query.position.as_deref().unwrap_or_default() {
+        "" => 0,
+        cursor if cursor.len() <= 128 => filtered
+            .iter()
+            .position(|transaction| transaction.gid == cursor)
+            .map(|position| position + 1)
+            .ok_or("invalid transaction position")?,
+        _ => return Err("invalid transaction position"),
+    };
+    let total = filtered.len();
+    let items = filtered
+        .into_iter()
+        .skip(position)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let has_more = position.saturating_add(items.len()) < total;
+    let next_position = has_more
+        .then(|| items.last().map(|transaction| transaction.gid.clone()))
+        .flatten()
+        .unwrap_or_default();
+    Ok(serde_json::json!({
+        "transactions": items,
+        "next_position": next_position,
+        "dtm_result": "SUCCESS"
+    }))
 }
 
 fn compat_response(value: serde_json::Value) -> HttpResponse {
@@ -1021,16 +1081,27 @@ async fn compat_admin_operation(
 async fn compat_reset_retry_batch(
     State(state): State<ControlState>,
     headers: HeaderMap,
-    Query(query): Query<CompatQuery>,
+    Query(query): Query<CompatResetCronQuery>,
 ) -> HttpResponse {
     if !authorize(&state, &headers) {
         return unauthorized_response();
     }
     let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
-    match state.dtm.reset_retry_batch(limit).await {
-        Ok(reset) => compat_response(serde_json::json!({
+    let timeout_seconds = query
+        .timeout
+        .unwrap_or(DEFAULT_COMPAT_RESET_TIMEOUT_SECONDS);
+    if timeout_seconds > MAX_COMPAT_RESET_TIMEOUT_SECONDS {
+        return compat_failure("invalid resetCronTime timeout");
+    }
+    let timeout_millis = timeout_seconds.saturating_mul(1_000);
+    match state
+        .dtm
+        .reset_retry_batch_after(timeout_millis, limit)
+        .await
+    {
+        Ok((reset, has_remaining)) => compat_response(serde_json::json!({
             "succeed_count": reset.len(),
-            "has_remaining": reset.len() == limit,
+            "has_remaining": has_remaining,
             "dtm_result": "SUCCESS"
         })),
         Err(_) => compat_failure("batch retry reset failed"),
@@ -2756,6 +2827,64 @@ mod tests {
         assert!(constant_time_eq(b"same-token", b"same-token"));
         assert!(!constant_time_eq(b"same-token", b"other-token"));
         assert!(!constant_time_eq(b"same-token", b"same-token-longer"));
+    }
+
+    #[test]
+    fn compat_all_uses_time_filters_and_string_cursor() {
+        let mut older = Transaction::tcc("older", Vec::new());
+        older.created_at_millis = 100;
+        let mut newer = Transaction::tcc("newer", Vec::new());
+        newer.created_at_millis = 200;
+        let mut other_kind = Transaction::saga("other-kind", Vec::new());
+        other_kind.created_at_millis = 300;
+        let transactions = vec![older, newer, other_kind];
+
+        let first = build_compat_all_response(
+            transactions.clone(),
+            CompatQuery {
+                trans_type: Some("tcc".to_owned()),
+                create_time_start: Some(100),
+                create_time_end: Some(200),
+                limit: Some(1),
+                ..CompatQuery::default()
+            },
+        )
+        .expect("first compatibility page");
+        assert_eq!(first["transactions"][0]["gid"], "newer");
+        assert_eq!(first["next_position"], "newer");
+
+        let second = build_compat_all_response(
+            transactions,
+            CompatQuery {
+                trans_type: Some("tcc".to_owned()),
+                create_time_start: Some(100),
+                create_time_end: Some(200),
+                position: Some("newer".to_owned()),
+                limit: Some(1),
+                ..CompatQuery::default()
+            },
+        )
+        .expect("second compatibility page");
+        assert_eq!(second["transactions"][0]["gid"], "older");
+        assert_eq!(second["next_position"], "");
+
+        assert!(build_compat_all_response(
+            Vec::new(),
+            CompatQuery {
+                position: Some("not-a-cursor".to_owned()),
+                ..CompatQuery::default()
+            },
+        )
+        .is_err());
+        assert!(build_compat_all_response(
+            Vec::new(),
+            CompatQuery {
+                create_time_start: Some(2),
+                create_time_end: Some(1),
+                ..CompatQuery::default()
+            },
+        )
+        .is_err());
     }
 
     #[test]

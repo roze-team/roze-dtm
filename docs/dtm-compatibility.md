@@ -17,9 +17,9 @@
 | `POST /api/dtmsvr/prepareWorkflow` | 幂等创建 Prepared Workflow 并返回 transaction/progresses |
 | `POST /api/dtmsvr/forceStop` | 将非终态事务永久标记为 Failed |
 | `POST /api/dtmsvr/resetNextCronTime` | 让一个事务立即进入恢复调度 |
-| `GET /api/dtmsvr/resetCronTime` | 批量重置非终态事务的恢复时间 |
+| `GET /api/dtmsvr/resetCronTime` | 按 `timeout` 秒阈值批量重置未来恢复时间，并返回准确的 `has_remaining` |
 | `GET /api/dtmsvr/query` | 查询全局事务与分支 |
-| `GET /api/dtmsvr/all` | 按 GID、类型、状态分页查询 |
+| `GET /api/dtmsvr/all` | 按 GID、类型、状态及创建时间范围分页查询；`position`/`next_position` 使用字符串游标 |
 | `GET /api/dtmsvr/subscribe` | 创建 topic 或添加 URL 订阅者，使用版本化 CAS 更新 |
 | `GET /api/dtmsvr/unsubscribe` | 从 topic 删除 URL 订阅者 |
 | `DELETE /api/dtmsvr/topic/{topic_name}` | 删除 topic |
@@ -29,6 +29,8 @@
 | `POST /api/json-rpc` | JSON-RPC 2.0：newGid、prepare、submit、abort、registerBranch |
 
 兼容响应保留 `dtm_result: SUCCESS/FAILURE`。启用 `control_token` 时，兼容端点和 `/v1/**` 一样要求 Bearer token。
+
+`all` 接受上游字段 `createTimeStart`、`createTimeEnd`（Unix 毫秒时间戳，边界包含），并以创建时间倒序、GID 倒序稳定分页。`position` 是上一页末项的唯一 GID，不应解析或自行构造；空字符串表示首页或没有下一页，无效游标及倒置时间范围会返回 `FAILURE`。`resetCronTime` 的 `timeout` 单位为秒，缺省值为 105 秒；它只重置恢复时间晚于“当前时间 + timeout”的事务，批次之外仍有匹配项时 `has_remaining=true`。
 
 ## TCC 调用顺序
 
