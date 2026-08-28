@@ -4,6 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use anyhow::Context as _;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use sqlx::{
@@ -102,6 +103,59 @@ pub struct Branch {
     pub dependencies: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkflowProgressStatus {
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowProgress {
+    pub branch_id: String,
+    pub operation: String,
+    pub status: WorkflowProgressStatus,
+    #[serde(with = "base64_bytes")]
+    pub data: Vec<u8>,
+}
+
+impl WorkflowProgress {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.branch_id.is_empty() && self.branch_id.len() <= 128,
+            "workflow progress branch id must contain 1 to 128 bytes"
+        );
+        anyhow::ensure!(
+            !self.operation.is_empty() && self.operation.len() <= 64,
+            "workflow progress operation must contain 1 to 64 bytes"
+        );
+        anyhow::ensure!(
+            self.data.len() <= 2 * 1024 * 1024,
+            "workflow progress data exceeds 2 MiB"
+        );
+        Ok(())
+    }
+}
+
+mod base64_bytes {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&STANDARD.encode(value))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        STANDARD.decode(value).map_err(D::Error::custom)
+    }
+}
+
 impl Branch {
     pub fn saga(
         id: impl Into<String>,
@@ -196,6 +250,8 @@ pub struct Transaction {
     pub timeout_millis: Option<u64>,
     #[serde(default)]
     pub options: TransactionOptions,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflow_progresses: Vec<WorkflowProgress>,
     pub metadata: BTreeMap<String, String>,
 }
 
@@ -235,6 +291,7 @@ impl Transaction {
             updated_at_millis: now,
             timeout_millis: None,
             options: TransactionOptions::default(),
+            workflow_progresses: Vec::new(),
             metadata: BTreeMap::new(),
         }
     }
@@ -350,6 +407,22 @@ pub trait TransactionStore: Send + Sync + 'static {
     /// Implementations must serialize concurrent registrations for the same
     /// transaction so one writer cannot overwrite a branch added by another.
     async fn register_branch(&self, gid: &str, branch: Branch) -> anyhow::Result<Transaction>;
+    async fn record_workflow_progress(
+        &self,
+        _gid: &str,
+        _progress: WorkflowProgress,
+    ) -> anyhow::Result<Transaction> {
+        anyhow::bail!("workflow progress persistence is not supported by this store")
+    }
+    async fn finish_workflow(
+        &self,
+        _gid: &str,
+        _status: TransactionStatus,
+        _rollback_reason: Option<String>,
+        _result: Option<String>,
+    ) -> anyhow::Result<Transaction> {
+        anyhow::bail!("workflow completion persistence is not supported by this store")
+    }
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>>;
     async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>>;
     async fn list_kv(
@@ -393,6 +466,26 @@ where
 
     async fn register_branch(&self, gid: &str, branch: Branch) -> anyhow::Result<Transaction> {
         (**self).register_branch(gid, branch).await
+    }
+
+    async fn record_workflow_progress(
+        &self,
+        gid: &str,
+        progress: WorkflowProgress,
+    ) -> anyhow::Result<Transaction> {
+        (**self).record_workflow_progress(gid, progress).await
+    }
+
+    async fn finish_workflow(
+        &self,
+        gid: &str,
+        status: TransactionStatus,
+        rollback_reason: Option<String>,
+        result: Option<String>,
+    ) -> anyhow::Result<Transaction> {
+        (**self)
+            .finish_workflow(gid, status, rollback_reason, result)
+            .await
     }
 
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>> {
@@ -646,6 +739,34 @@ impl TransactionStore for InMemoryTransactionStore {
             .get_mut(gid)
             .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         append_dynamic_branch(tx, branch)?;
+        Ok(tx.clone())
+    }
+
+    async fn record_workflow_progress(
+        &self,
+        gid: &str,
+        progress: WorkflowProgress,
+    ) -> anyhow::Result<Transaction> {
+        let mut txs = self.txs.write().await;
+        let tx = txs
+            .get_mut(gid)
+            .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        append_workflow_progress(tx, progress)?;
+        Ok(tx.clone())
+    }
+
+    async fn finish_workflow(
+        &self,
+        gid: &str,
+        status: TransactionStatus,
+        rollback_reason: Option<String>,
+        result: Option<String>,
+    ) -> anyhow::Result<Transaction> {
+        let mut txs = self.txs.write().await;
+        let tx = txs
+            .get_mut(gid)
+            .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        apply_workflow_completion(tx, status, rollback_reason, result)?;
         Ok(tx.clone())
     }
 
@@ -918,6 +1039,79 @@ impl TransactionStore for SqliteTransactionStore {
             }
         }
         anyhow::bail!("transaction {gid} branch registration is contended")
+    }
+
+    async fn record_workflow_progress(
+        &self,
+        gid: &str,
+        progress: WorkflowProgress,
+    ) -> anyhow::Result<Transaction> {
+        for _ in 0..16 {
+            let row = sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = ?")
+                .bind(gid)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+            let previous_payload = row.get::<&str, _>("payload").to_owned();
+            let mut tx: Transaction = serde_json::from_str(&previous_payload)?;
+            append_workflow_progress(&mut tx, progress.clone())?;
+            let payload = serde_json::to_string(&tx)?;
+            let changed = sqlx::query(
+                "UPDATE roze_dtm_transactions SET payload = ?, updated_at_millis = ? \
+                 WHERE gid = ? AND payload = ?",
+            )
+            .bind(payload)
+            .bind(tx.updated_at_millis as i64)
+            .bind(gid)
+            .bind(previous_payload)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            if changed == 1 {
+                return Ok(tx);
+            }
+        }
+        anyhow::bail!("transaction {gid} workflow progress update is contended")
+    }
+
+    async fn finish_workflow(
+        &self,
+        gid: &str,
+        status: TransactionStatus,
+        rollback_reason: Option<String>,
+        result: Option<String>,
+    ) -> anyhow::Result<Transaction> {
+        for _ in 0..16 {
+            let row = sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = ?")
+                .bind(gid)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+            let previous_payload = row.get::<&str, _>("payload").to_owned();
+            let mut tx: Transaction = serde_json::from_str(&previous_payload)?;
+            apply_workflow_completion(
+                &mut tx,
+                status,
+                rollback_reason.clone(),
+                result.clone(),
+            )?;
+            let payload = serde_json::to_string(&tx)?;
+            let changed = sqlx::query(
+                "UPDATE roze_dtm_transactions SET payload = ?, updated_at_millis = ? \
+                 WHERE gid = ? AND payload = ?",
+            )
+            .bind(payload)
+            .bind(tx.updated_at_millis as i64)
+            .bind(gid)
+            .bind(previous_payload)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            if changed == 1 {
+                return Ok(tx);
+            }
+        }
+        anyhow::bail!("transaction {gid} workflow completion is contended")
     }
 
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>> {
@@ -1243,6 +1437,64 @@ impl TransactionStore for PostgresTransactionStore {
         .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
         append_dynamic_branch(&mut tx, branch)?;
+        let payload = serde_json::to_string(&tx)?;
+        sqlx::query(
+            "UPDATE roze_dtm_transactions SET payload = $1, updated_at_millis = $2 WHERE gid = $3",
+        )
+        .bind(payload)
+        .bind(tx.updated_at_millis as i64)
+        .bind(gid)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(tx)
+    }
+
+    async fn record_workflow_progress(
+        &self,
+        gid: &str,
+        progress: WorkflowProgress,
+    ) -> anyhow::Result<Transaction> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT payload FROM roze_dtm_transactions WHERE gid = $1 FOR UPDATE",
+        )
+        .bind(gid)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
+        append_workflow_progress(&mut tx, progress)?;
+        let payload = serde_json::to_string(&tx)?;
+        sqlx::query(
+            "UPDATE roze_dtm_transactions SET payload = $1, updated_at_millis = $2 WHERE gid = $3",
+        )
+        .bind(payload)
+        .bind(tx.updated_at_millis as i64)
+        .bind(gid)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(tx)
+    }
+
+    async fn finish_workflow(
+        &self,
+        gid: &str,
+        status: TransactionStatus,
+        rollback_reason: Option<String>,
+        result: Option<String>,
+    ) -> anyhow::Result<Transaction> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT payload FROM roze_dtm_transactions WHERE gid = $1 FOR UPDATE",
+        )
+        .bind(gid)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
+        apply_workflow_completion(&mut tx, status, rollback_reason, result)?;
         let payload = serde_json::to_string(&tx)?;
         sqlx::query(
             "UPDATE roze_dtm_transactions SET payload = $1, updated_at_millis = $2 WHERE gid = $3",
@@ -1603,6 +1855,64 @@ impl TransactionStore for MySqlTransactionStore {
         Ok(tx)
     }
 
+    async fn record_workflow_progress(
+        &self,
+        gid: &str,
+        progress: WorkflowProgress,
+    ) -> anyhow::Result<Transaction> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT payload FROM roze_dtm_transactions WHERE gid = ? FOR UPDATE",
+        )
+        .bind(gid)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
+        append_workflow_progress(&mut tx, progress)?;
+        let payload = serde_json::to_string(&tx)?;
+        sqlx::query(
+            "UPDATE roze_dtm_transactions SET payload = ?, updated_at_millis = ? WHERE gid = ?",
+        )
+        .bind(payload)
+        .bind(tx.updated_at_millis as i64)
+        .bind(gid)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(tx)
+    }
+
+    async fn finish_workflow(
+        &self,
+        gid: &str,
+        status: TransactionStatus,
+        rollback_reason: Option<String>,
+        result: Option<String>,
+    ) -> anyhow::Result<Transaction> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT payload FROM roze_dtm_transactions WHERE gid = ? FOR UPDATE",
+        )
+        .bind(gid)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
+        apply_workflow_completion(&mut tx, status, rollback_reason, result)?;
+        let payload = serde_json::to_string(&tx)?;
+        sqlx::query(
+            "UPDATE roze_dtm_transactions SET payload = ?, updated_at_millis = ? WHERE gid = ?",
+        )
+        .bind(payload)
+        .bind(tx.updated_at_millis as i64)
+        .bind(gid)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(tx)
+    }
+
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>> {
         let rows =
             sqlx::query("SELECT payload FROM roze_dtm_transactions ORDER BY updated_at_millis ASC")
@@ -1874,8 +2184,10 @@ where
         if tx.kind == TransactionKind::Message {
             self.expand_message_topics(&mut tx).await?;
         }
-        tx.timeout_millis
-            .get_or_insert(self.options.transaction_timeout_millis);
+        if !is_callback_workflow(&tx) {
+            tx.timeout_millis
+                .get_or_insert(self.options.transaction_timeout_millis);
+        }
         self.store.insert_transaction(tx.clone()).await?;
         Ok(tx)
     }
@@ -1928,6 +2240,26 @@ where
     /// Re-registering the same branch is idempotent when its definition matches.
     pub async fn register_branch(&self, gid: &str, branch: Branch) -> anyhow::Result<Transaction> {
         self.store.register_branch(gid, branch).await
+    }
+
+    pub async fn record_workflow_progress(
+        &self,
+        gid: &str,
+        progress: WorkflowProgress,
+    ) -> anyhow::Result<Transaction> {
+        self.store.record_workflow_progress(gid, progress).await
+    }
+
+    pub async fn finish_callback_workflow(
+        &self,
+        gid: &str,
+        status: TransactionStatus,
+        rollback_reason: Option<String>,
+        result: Option<String>,
+    ) -> anyhow::Result<Transaction> {
+        self.store
+            .finish_workflow(gid, status, rollback_reason, result)
+            .await
     }
 
     /// Validates that a transaction can be submitted by the lifecycle-managed
@@ -2348,7 +2680,7 @@ where
         let mut tx = self
             .transaction_of_kind(gid, TransactionKind::Workflow)
             .await?;
-        if tx.status == TransactionStatus::Prepared {
+        if tx.status == TransactionStatus::Prepared || tx.status.is_terminal() {
             return Ok(tx);
         }
         ensure_status(&tx, &[TransactionStatus::Submitted])?;
@@ -2718,6 +3050,15 @@ where
             return match tx.kind {
                 TransactionKind::Tcc => self.cancel_tcc(gid).await,
                 TransactionKind::Saga => self.abort_saga(gid).await,
+                TransactionKind::Workflow if is_callback_workflow(&tx) => {
+                    self.finish_callback_workflow(
+                        gid,
+                        TransactionStatus::Failed,
+                        Some("workflow callback timed out".to_owned()),
+                        None,
+                    )
+                    .await
+                }
                 TransactionKind::Workflow => self.abort_workflow(gid).await,
                 TransactionKind::Message if tx.status == TransactionStatus::Succeeding => {
                     self.dispatch_message(gid).await
@@ -2776,6 +3117,15 @@ where
                 let next = match tx.kind {
                     TransactionKind::Tcc => self.cancel_tcc(&tx.gid).await?,
                     TransactionKind::Saga => self.abort_saga(&tx.gid).await?,
+                    TransactionKind::Workflow if is_callback_workflow(&tx) => {
+                        self.finish_callback_workflow(
+                            &tx.gid,
+                            TransactionStatus::Failed,
+                            Some("workflow callback timed out".to_owned()),
+                            None,
+                        )
+                        .await?
+                    }
                     TransactionKind::Workflow => self.abort_workflow(&tx.gid).await?,
                     TransactionKind::Message if tx.status == TransactionStatus::Succeeding => {
                         self.dispatch_message(&tx.gid).await?
@@ -2933,6 +3283,125 @@ fn append_dynamic_branch(tx: &mut Transaction, branch: Branch) -> anyhow::Result
     tx.branches.push(branch);
     tx.updated_at_millis = current_millis();
     Ok(())
+}
+
+fn append_workflow_progress(
+    tx: &mut Transaction,
+    progress: WorkflowProgress,
+) -> anyhow::Result<()> {
+    ensure_callback_workflow(tx)?;
+    ensure_status(tx, &[TransactionStatus::Prepared])?;
+    progress.validate()?;
+    if let Some(existing) = tx.workflow_progresses.iter().find(|existing| {
+        existing.branch_id == progress.branch_id && existing.operation == progress.operation
+    }) {
+        anyhow::ensure!(
+            existing == &progress,
+            "workflow progress conflicts: {}:{}",
+            progress.branch_id,
+            progress.operation
+        );
+        return Ok(());
+    }
+    anyhow::ensure!(
+        tx.workflow_progresses.len() < 1_000,
+        "workflow progress count exceeds 1000"
+    );
+    let total_bytes = tx
+        .workflow_progresses
+        .iter()
+        .try_fold(progress.data.len(), |total, item| {
+            total.checked_add(item.data.len())
+        })
+        .context("workflow progress data size overflow")?;
+    anyhow::ensure!(
+        total_bytes <= 2 * 1024 * 1024,
+        "workflow progress data exceeds 2 MiB in total"
+    );
+    tx.workflow_progresses.push(progress);
+    tx.updated_at_millis = current_millis();
+    Ok(())
+}
+
+fn apply_workflow_completion(
+    tx: &mut Transaction,
+    status: TransactionStatus,
+    rollback_reason: Option<String>,
+    result: Option<String>,
+) -> anyhow::Result<()> {
+    ensure_callback_workflow(tx)?;
+    anyhow::ensure!(
+        matches!(status, TransactionStatus::Succeeded | TransactionStatus::Failed),
+        "workflow completion status must be succeeded or failed"
+    );
+    let rollback_reason = rollback_reason.unwrap_or_default();
+    let result = result.unwrap_or_default();
+    anyhow::ensure!(
+        rollback_reason.len() <= 4_096,
+        "workflow rollback reason exceeds 4096 bytes"
+    );
+    anyhow::ensure!(
+        result.len() <= 2 * 1024 * 1024,
+        "workflow result exceeds 2 MiB"
+    );
+    if tx.status.is_terminal() {
+        anyhow::ensure!(
+            tx.status == status
+                && tx
+                    .metadata
+                    .get("rollback_reason")
+                    .map(String::as_str)
+                    .unwrap_or_default()
+                    == rollback_reason.as_str()
+                && tx
+                    .metadata
+                    .get("dtm.workflow.result")
+                    .map(String::as_str)
+                    .unwrap_or_default()
+                    == result.as_str(),
+            "workflow completion conflicts with terminal transaction {}",
+            tx.gid
+        );
+        return Ok(());
+    }
+    ensure_status(tx, &[TransactionStatus::Prepared])?;
+    tx.status = status;
+    if rollback_reason.is_empty() {
+        tx.metadata.remove("rollback_reason");
+    } else {
+        tx.metadata
+            .insert("rollback_reason".to_owned(), rollback_reason);
+    }
+    if result.is_empty() {
+        tx.metadata.remove("dtm.workflow.result");
+    } else {
+        tx.metadata.insert("dtm.workflow.result".to_owned(), result);
+    }
+    tx.updated_at_millis = current_millis();
+    Ok(())
+}
+
+fn ensure_callback_workflow(tx: &Transaction) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        tx.kind == TransactionKind::Workflow,
+        "transaction {} is not a workflow",
+        tx.gid
+    );
+    anyhow::ensure!(
+        is_callback_workflow(tx),
+        "transaction {} is not a callback workflow",
+        tx.gid
+    );
+    Ok(())
+}
+
+fn is_callback_workflow(tx: &Transaction) -> bool {
+    tx.kind == TransactionKind::Workflow
+        && tx.branches.is_empty()
+        && tx
+            .metadata
+            .get("dtm.query_prepared")
+            .is_some_and(|value| !value.is_empty())
 }
 
 fn ensure_kind(tx: &Transaction, expected: TransactionKind) -> anyhow::Result<()> {
@@ -3606,6 +4075,172 @@ mod tests {
 
         assert!(dtm
             .schedule_submit("gid-tcc-not-prepared")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn callback_workflow_preserves_composite_progress_and_binary_data() {
+        let dtm = Dtm::new(InMemoryTransactionStore::new());
+        let mut workflow = Transaction::workflow("gid-callback-workflow", Vec::new());
+        workflow.metadata.insert(
+            "dtm.query_prepared".to_owned(),
+            "http://workflow/callback".to_owned(),
+        );
+        dtm.submit(workflow).await.expect("submit callback workflow");
+        dtm.prepare_workflow("gid-callback-workflow")
+            .await
+            .expect("prepare callback workflow");
+
+        let action = WorkflowProgress {
+            branch_id: "01".to_owned(),
+            operation: "action".to_owned(),
+            status: WorkflowProgressStatus::Succeeded,
+            data: vec![0, 159, 146, 150, 255],
+        };
+        dtm.record_workflow_progress("gid-callback-workflow", action.clone())
+            .await
+            .expect("record action");
+        dtm.record_workflow_progress("gid-callback-workflow", action.clone())
+            .await
+            .expect("idempotent action");
+        dtm.record_workflow_progress(
+            "gid-callback-workflow",
+            WorkflowProgress {
+                branch_id: "01".to_owned(),
+                operation: "commit".to_owned(),
+                status: WorkflowProgressStatus::Succeeded,
+                data: vec![1, 2, 3],
+            },
+        )
+        .await
+        .expect("same branch with another operation");
+
+        let prepared = dtm
+            .prepare_workflow("gid-callback-workflow")
+            .await
+            .expect("query progress");
+        assert_eq!(prepared.workflow_progresses.len(), 2);
+        assert_eq!(prepared.workflow_progresses[0], action);
+        assert!(dtm
+            .record_workflow_progress(
+                "gid-callback-workflow",
+                WorkflowProgress {
+                    branch_id: "01".to_owned(),
+                    operation: "action".to_owned(),
+                    status: WorkflowProgressStatus::Failed,
+                    data: b"conflict".to_vec(),
+                },
+            )
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn workflow_progress_json_preserves_binary_data_as_base64() {
+        let progress = WorkflowProgress {
+            branch_id: "01".to_owned(),
+            operation: "action".to_owned(),
+            status: WorkflowProgressStatus::Succeeded,
+            data: vec![0, 255, 1],
+        };
+
+        let encoded = serde_json::to_value(&progress).expect("serialize progress");
+        assert_eq!(encoded["data"], "AP8B");
+        let decoded: WorkflowProgress =
+            serde_json::from_value(encoded).expect("deserialize progress");
+        assert_eq!(decoded, progress);
+    }
+
+    #[tokio::test]
+    async fn callback_workflow_uses_only_explicit_timeout_and_fails_closed() {
+        let dtm = Dtm::new(InMemoryTransactionStore::new());
+        let mut workflow = Transaction::workflow("gid-callback-timeout", Vec::new());
+        workflow.created_at_millis = 0;
+        workflow.updated_at_millis = 0;
+        workflow.metadata.insert(
+            "dtm.query_prepared".to_owned(),
+            "http://workflow/callback".to_owned(),
+        );
+        let submitted = dtm
+            .submit(workflow)
+            .await
+            .expect("submit callback workflow");
+        assert_eq!(submitted.timeout_millis, None);
+
+        let mut expiring = Transaction::workflow("gid-callback-expiring", Vec::new());
+        expiring.created_at_millis = 0;
+        expiring.updated_at_millis = 0;
+        expiring.timeout_millis = Some(1);
+        expiring.metadata.insert(
+            "dtm.query_prepared".to_owned(),
+            "http://workflow/callback".to_owned(),
+        );
+        dtm.submit(expiring)
+            .await
+            .expect("submit expiring callback workflow");
+        dtm.prepare_workflow("gid-callback-expiring")
+            .await
+            .expect("prepare expiring callback workflow");
+        let failed = dtm
+            .recover("gid-callback-expiring")
+            .await
+            .expect("expire callback workflow");
+        assert_eq!(failed.status, TransactionStatus::Failed);
+        assert_eq!(
+            failed.metadata["rollback_reason"],
+            "workflow callback timed out"
+        );
+    }
+
+    #[tokio::test]
+    async fn callback_workflow_completion_is_terminal_and_idempotent() {
+        let dtm = Dtm::new(InMemoryTransactionStore::new());
+        let mut workflow = Transaction::workflow("gid-callback-complete", Vec::new());
+        workflow.metadata.insert(
+            "dtm.query_prepared".to_owned(),
+            "http://workflow/callback".to_owned(),
+        );
+        dtm.submit(workflow).await.expect("submit callback workflow");
+        dtm.prepare_workflow("gid-callback-complete")
+            .await
+            .expect("prepare callback workflow");
+
+        let completed = dtm
+            .finish_callback_workflow(
+                "gid-callback-complete",
+                TransactionStatus::Succeeded,
+                None,
+                Some("cmVzdWx0".to_owned()),
+            )
+            .await
+            .expect("finish callback workflow");
+        assert_eq!(completed.status, TransactionStatus::Succeeded);
+        assert_eq!(
+            completed.metadata["dtm.workflow.result"],
+            "cmVzdWx0"
+        );
+
+        let queried = dtm
+            .prepare_workflow("gid-callback-complete")
+            .await
+            .expect("query terminal workflow");
+        assert_eq!(queried.status, TransactionStatus::Succeeded);
+        dtm.finish_callback_workflow(
+            "gid-callback-complete",
+            TransactionStatus::Succeeded,
+            None,
+            Some("cmVzdWx0".to_owned()),
+        )
+        .await
+        .expect("idempotent completion");
+        assert!(dtm
+            .finish_callback_workflow(
+                "gid-callback-complete",
+                TransactionStatus::Failed,
+                Some("late failure".to_owned()),
+                None,
+            )
             .await
             .is_err());
     }

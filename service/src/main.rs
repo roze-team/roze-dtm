@@ -10,12 +10,13 @@ use std::{
 mod grpc;
 
 use anyhow::Context as _;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use roze_dtm::{
     Branch, BranchKind, BranchStatus, BranchUrlPolicy, Dtm, DtmOptions, HttpBranchInvoker,
     InMemoryTransactionStore, MySqlTransactionStore, PostgresTransactionStore,
     SqliteTransactionStore, Transaction, TransactionKind, TransactionOptions, TransactionStatus,
-    TransactionStore,
+    TransactionStore, WorkflowProgress, WorkflowProgressStatus,
 };
 use roze_http::{
     rest::{self, HttpResponse, RestServer, RestService},
@@ -349,9 +350,18 @@ struct CompatBranchRequest {
     trans_type: String,
     branch_id: String,
     data: Option<String>,
+    op: Option<String>,
+    status: Option<String>,
     confirm: Option<String>,
     cancel: Option<String>,
     url: Option<String>,
+    #[serde(skip)]
+    binary_data: Option<Vec<u8>>,
+}
+
+enum CompatRegistration {
+    Branch(Branch),
+    Workflow(WorkflowProgress),
 }
 
 #[derive(Deserialize)]
@@ -920,13 +930,44 @@ async fn compat_prepare_workflow(
     }
     request.trans_type = "workflow".to_owned();
     match compat_apply(&state, request, CompatOperation::Prepare).await {
-        Ok(transaction) => compat_response(serde_json::json!({
-            "transaction": &transaction,
-            "progresses": &transaction.branches,
-            "dtm_result": "SUCCESS"
-        })),
+        Ok(transaction) => compat_response(compat_workflow_response(&transaction)),
         Err(_) => compat_failure("workflow preparation failed"),
     }
+}
+
+fn compat_workflow_response(transaction: &Transaction) -> serde_json::Value {
+    let rollback_reason = transaction
+        .metadata
+        .get("rollback_reason")
+        .cloned()
+        .unwrap_or_default();
+    let result = transaction
+        .metadata
+        .get("dtm.workflow.result")
+        .cloned()
+        .unwrap_or_default();
+    let progresses = transaction
+        .workflow_progresses
+        .iter()
+        .map(|progress| {
+            serde_json::json!({
+                "status": workflow_progress_status_name(progress.status),
+                "bin_data": BASE64_STANDARD.encode(&progress.data),
+                "branch_id": &progress.branch_id,
+                "op": &progress.operation,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "transaction": {
+            "gid": &transaction.gid,
+            "status": compat_workflow_status_name(transaction.status),
+            "rollback_reason": rollback_reason,
+            "result": result,
+        },
+        "progresses": progresses,
+        "dtm_result": "SUCCESS",
+    })
 }
 
 async fn compat_submit(
@@ -980,8 +1021,31 @@ async fn compat_apply(
     let kind = parse_kind(&request.trans_type).map_err(anyhow::Error::msg)?;
     let gid = request.gid.trim().to_owned();
     let wait_result = request.wait_result;
+    let callback_completion = callback_workflow_completion(kind, operation, &request)?;
     anyhow::ensure!(!gid.is_empty() && gid.len() <= 128, "invalid gid");
     let existing = state.dtm.store().get_transaction(&gid).await?;
+    let callback_workflow = kind == TransactionKind::Workflow
+        && (request
+            .query_prepared
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+            || existing.as_ref().is_some_and(|transaction| {
+                transaction.branches.is_empty()
+                    && transaction
+                        .metadata
+                        .get("dtm.query_prepared")
+                        .is_some_and(|value| !value.is_empty())
+            }));
+    anyhow::ensure!(
+        callback_completion.is_none() || existing.is_some(),
+        "callback workflow must be prepared before completion"
+    );
+    anyhow::ensure!(
+        !callback_workflow
+            || !matches!(operation, CompatOperation::Submit)
+            || callback_completion.is_some(),
+        "callback workflow completion status is required"
+    );
     if existing.is_none() {
         let mut transaction = compat_transaction(kind, &request, &state.branch_url_policy)?;
         if let Some(seconds) = request.timeout_to_fail {
@@ -992,6 +1056,12 @@ async fn compat_apply(
             transaction.metadata.insert("rollback_reason".to_string(), reason);
         }
         state.dtm.submit(transaction).await?;
+    }
+    if let Some((status, rollback_reason, result)) = callback_completion {
+        return state
+            .dtm
+            .finish_callback_workflow(&gid, status, rollback_reason, result)
+            .await;
     }
     if !wait_result {
         match operation {
@@ -1024,6 +1094,29 @@ async fn compat_apply(
             .await?
             .context("transaction not found"),
     }
+}
+
+fn callback_workflow_completion(
+    kind: TransactionKind,
+    operation: CompatOperation,
+    request: &CompatTransactionRequest,
+) -> anyhow::Result<Option<(TransactionStatus, Option<String>, Option<String>)>> {
+    if kind != TransactionKind::Workflow || !matches!(operation, CompatOperation::Submit) {
+        return Ok(None);
+    }
+    let Some(status) = request.req_extra.get("status") else {
+        return Ok(None);
+    };
+    let status = match status.as_str() {
+        "succeed" | "succeeded" => TransactionStatus::Succeeded,
+        "failed" => TransactionStatus::Failed,
+        _ => anyhow::bail!("callback workflow status must be succeed or failed"),
+    };
+    Ok(Some((
+        status,
+        request.req_extra.get("rollback_reason").cloned(),
+        request.req_extra.get("result").cloned(),
+    )))
 }
 
 fn preserve_compat_metadata(
@@ -1081,27 +1174,61 @@ async fn compat_register_branch(
         return unauthorized_response();
     }
     let gid = request.gid.clone();
-    let branch = match compat_branch_from_request(&state, request) {
-        Ok(branch) => branch,
+    let registration = match compat_registration_from_request(&state, request) {
+        Ok(registration) => registration,
         Err(_) => return compat_failure("invalid branch registration"),
     };
-    match state.dtm.register_branch(&gid, branch).await {
+    match apply_compat_registration(&state, &gid, registration).await {
         Ok(_) => compat_response(serde_json::json!({"dtm_result": "SUCCESS"})),
         Err(_) => compat_failure("branch registration failed"),
     }
 }
 
-fn compat_branch_from_request(
+async fn apply_compat_registration(
+    state: &ControlState,
+    gid: &str,
+    registration: CompatRegistration,
+) -> anyhow::Result<Transaction> {
+    anyhow::ensure!(!gid.is_empty() && gid.len() <= 128, "invalid gid");
+    match registration {
+        CompatRegistration::Branch(branch) => state.dtm.register_branch(gid, branch).await,
+        CompatRegistration::Workflow(progress) => {
+            state.dtm.record_workflow_progress(gid, progress).await
+        }
+    }
+}
+
+fn compat_registration_from_request(
     state: &ControlState,
     request: CompatBranchRequest,
-) -> anyhow::Result<Branch> {
+) -> anyhow::Result<CompatRegistration> {
+    let kind = parse_kind(&request.trans_type).map_err(anyhow::Error::msg)?;
+    if kind == TransactionKind::Workflow {
+        let status = match request.status.as_deref() {
+            Some("succeed" | "succeeded") => WorkflowProgressStatus::Succeeded,
+            Some("failed") => WorkflowProgressStatus::Failed,
+            _ => anyhow::bail!("workflow progress status must be succeed or failed"),
+        };
+        let data = request
+            .binary_data
+            .or_else(|| request.data.map(String::into_bytes))
+            .unwrap_or_default();
+        let progress = WorkflowProgress {
+            branch_id: request.branch_id,
+            operation: request.op.context("workflow progress operation is required")?,
+            status,
+            data,
+        };
+        progress.validate()?;
+        return Ok(CompatRegistration::Workflow(progress));
+    }
     let payload = request
         .data
         .as_deref()
         .and_then(|data| serde_json::from_str(data).ok())
         .unwrap_or(serde_json::Value::Null);
-    let branch = match parse_kind(&request.trans_type) {
-        Ok(TransactionKind::Tcc) => {
+    let branch = match kind {
+        TransactionKind::Tcc => {
             let confirm = request.confirm.context("TCC confirm URL is required")?;
             let cancel = request.cancel.context("TCC cancel URL is required")?;
             if state.branch_url_policy.validate(&confirm).is_err()
@@ -1113,7 +1240,7 @@ fn compat_branch_from_request(
             branch.status = BranchStatus::Succeeded;
             branch
         }
-        Ok(TransactionKind::Xa) => {
+        TransactionKind::Xa => {
             let url = request.url.context("XA phase2 URL is required")?;
             if state.branch_url_policy.validate(&url).is_err() {
                 anyhow::bail!("branch URL is not allowed");
@@ -1122,7 +1249,7 @@ fn compat_branch_from_request(
         }
         _ => anyhow::bail!("dynamic registration supports tcc and xa"),
     };
-    Ok(branch)
+    Ok(CompatRegistration::Branch(branch))
 }
 
 async fn json_rpc(
@@ -1168,12 +1295,12 @@ async fn json_rpc(
             match serde_json::from_value::<CompatBranchRequest>(request.params) {
                 Ok(params) => {
                     let gid = params.gid.clone();
-                    match compat_branch_from_request(&state, params) {
-                        Ok(branch) => state
-                            .dtm
-                            .register_branch(&gid, branch)
+                    match compat_registration_from_request(&state, params) {
+                        Ok(registration) => {
+                            apply_compat_registration(&state, &gid, registration)
                             .await
-                            .map(|_| serde_json::json!({})),
+                            .map(|_| serde_json::json!({}))
+                        }
                         Err(error) => Err(error),
                     }
                 }
@@ -1693,6 +1820,25 @@ const fn status_name(status: TransactionStatus) -> &'static str {
     }
 }
 
+const fn compat_workflow_status_name(status: TransactionStatus) -> &'static str {
+    match status {
+        TransactionStatus::Submitted
+        | TransactionStatus::Trying
+        | TransactionStatus::Succeeding => "submitted",
+        TransactionStatus::Prepared => "prepared",
+        TransactionStatus::Succeeded => "succeed",
+        TransactionStatus::Aborting => "aborting",
+        TransactionStatus::Aborted | TransactionStatus::Failed => "failed",
+    }
+}
+
+const fn workflow_progress_status_name(status: WorkflowProgressStatus) -> &'static str {
+    match status {
+        WorkflowProgressStatus::Succeeded => "succeed",
+        WorkflowProgressStatus::Failed => "failed",
+    }
+}
+
 fn audit_transition(event: &'static str, transaction: &Transaction) {
     if transaction.branches.iter().any(|branch| {
         matches!(
@@ -1951,6 +2097,55 @@ mod tests {
             options: TransactionOptions::default(),
         };
         assert!(build_transaction(TransactionKind::Message, topic_message, &policy).is_ok());
+    }
+
+    #[test]
+    fn callback_workflow_completion_uses_req_extra_contract() {
+        let request = CompatTransactionRequest {
+            gid: "workflow-1".to_owned(),
+            trans_type: "workflow".to_owned(),
+            req_extra: [
+                ("status".to_owned(), "failed".to_owned()),
+                ("rollback_reason".to_owned(), "business failure".to_owned()),
+                ("result".to_owned(), "cmVzdWx0".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            ..CompatTransactionRequest::default()
+        };
+
+        let completion = callback_workflow_completion(
+            TransactionKind::Workflow,
+            CompatOperation::Submit,
+            &request,
+        )
+        .expect("completion")
+        .expect("callback completion");
+        assert_eq!(completion.0, TransactionStatus::Failed);
+        assert_eq!(completion.1.as_deref(), Some("business failure"));
+        assert_eq!(completion.2.as_deref(), Some("cmVzdWx0"));
+    }
+
+    #[test]
+    fn callback_workflow_http_response_uses_proto_json_shapes() {
+        let mut transaction = Transaction::workflow("workflow-2", Vec::new());
+        transaction.status = TransactionStatus::Succeeded;
+        transaction
+            .metadata
+            .insert("dtm.workflow.result".to_owned(), "cmVzdWx0".to_owned());
+        transaction.workflow_progresses.push(WorkflowProgress {
+            branch_id: "01".to_owned(),
+            operation: "action".to_owned(),
+            status: WorkflowProgressStatus::Succeeded,
+            data: vec![0, 255, 1],
+        });
+
+        let response = compat_workflow_response(&transaction);
+        assert_eq!(response["transaction"]["status"], "succeed");
+        assert_eq!(response["transaction"]["result"], "cmVzdWx0");
+        assert_eq!(response["progresses"][0]["branch_id"], "01");
+        assert_eq!(response["progresses"][0]["op"], "action");
+        assert_eq!(response["progresses"][0]["bin_data"], "AP8B");
     }
 
     #[test]

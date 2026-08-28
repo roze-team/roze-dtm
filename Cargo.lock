@@ -2245,6 +2245,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "prost",
  "protoc-bin-vendored",
  "reqwest 0.13.4",
@@ -2267,6 +2268,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "config",
  "http",
  "roze-config",

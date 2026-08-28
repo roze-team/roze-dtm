@@ -56,27 +56,31 @@ impl Dtm for DtmGrpcService {
             gid,
             trans_type,
             branch_id,
+            op,
             mut data,
             busi_payload,
             ..
         } = request.into_inner();
-        let branch = CompatBranchRequest {
+        let registration = CompatBranchRequest {
             gid: gid.clone(),
             trans_type,
             branch_id,
             data: Some(
-                serde_json::to_string(&payload_value(busi_payload))
+                serde_json::to_string(&payload_value(busi_payload.clone()))
                     .map_err(|_| bad_request("invalid branch payload", &context))?,
             ),
+            op: data
+                .remove("op")
+                .or_else(|| (!op.is_empty()).then_some(op)),
+            status: data.remove("status"),
             confirm: data.remove("confirm"),
             cancel: data.remove("cancel"),
             url: data.remove("url"),
+            binary_data: Some(busi_payload),
         };
-        let branch = crate::compat_branch_from_request(&self.state, branch)
+        let registration = crate::compat_registration_from_request(&self.state, registration)
             .map_err(|_| bad_request("invalid branch registration", &context))?;
-        self.state
-            .dtm
-            .register_branch(&gid, branch)
+        crate::apply_compat_registration(&self.state, &gid, registration)
             .await
             .map_err(|_| operation_failed("branch registration failed", &context))?;
         success((), &context)
@@ -93,13 +97,13 @@ impl Dtm for DtmGrpcService {
             .await
             .map_err(|_| operation_failed("workflow preparation failed", &context))?;
         let progresses = transaction
-            .branches
+            .workflow_progresses
             .iter()
-            .map(|branch| DtmProgress {
-                status: branch_status_name(branch.status).to_owned(),
-                bin_data: serde_json::to_vec(&branch.payload).unwrap_or_default(),
-                branch_id: branch.id.clone(),
-                op: branch_operation(branch.kind).to_owned(),
+            .map(|progress| DtmProgress {
+                status: crate::workflow_progress_status_name(progress.status).to_owned(),
+                bin_data: progress.data.clone(),
+                branch_id: progress.branch_id.clone(),
+                op: progress.operation.clone(),
             })
             .collect();
         let rollback_reason = transaction
@@ -107,13 +111,18 @@ impl Dtm for DtmGrpcService {
             .get("rollback_reason")
             .cloned()
             .unwrap_or_default();
+        let result = transaction
+            .metadata
+            .get("dtm.workflow.result")
+            .cloned()
+            .unwrap_or_default();
         success(
             DtmProgressesReply {
                 transaction: Some(DtmTransaction {
                     gid: transaction.gid,
-                    status: crate::status_name(transaction.status).to_owned(),
+                    status: crate::compat_workflow_status_name(transaction.status).to_owned(),
                     rollback_reason,
-                    result: String::new(),
+                    result,
                 }),
                 progresses,
             },
@@ -269,30 +278,6 @@ fn operation_failed(message: &str, context: &roze_context::Context) -> Status {
         RozeError::FailedPrecondition(message.to_owned()),
         context,
     )
-}
-
-const fn branch_status_name(status: roze_dtm::BranchStatus) -> &'static str {
-    match status {
-        roze_dtm::BranchStatus::Pending => "prepared",
-        roze_dtm::BranchStatus::Running => "submitted",
-        roze_dtm::BranchStatus::Compensating => "submitted",
-        roze_dtm::BranchStatus::Succeeded => "succeed",
-        roze_dtm::BranchStatus::Failed => "failed",
-        roze_dtm::BranchStatus::Skipped => "failed",
-    }
-}
-
-const fn branch_operation(kind: roze_dtm::BranchKind) -> &'static str {
-    match kind {
-        roze_dtm::BranchKind::SagaAction
-        | roze_dtm::BranchKind::WorkflowAction
-        | roze_dtm::BranchKind::MessageAction => "action",
-        roze_dtm::BranchKind::SagaCompensate => "compensate",
-        roze_dtm::BranchKind::TccTry => "try",
-        roze_dtm::BranchKind::TccConfirm => "confirm",
-        roze_dtm::BranchKind::TccCancel => "cancel",
-        roze_dtm::BranchKind::XaAction => "commit",
-    }
 }
 
 #[cfg(test)]

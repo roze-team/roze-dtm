@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use roze_context::Context;
 use roze_grpc::transport::{Channel, Endpoint, Request};
 
@@ -5,6 +6,7 @@ use crate::pb::dtmgimp::{
     dtm_client::DtmClient as ProtoDtmClient, DtmBranchRequest, DtmProgressesReply, DtmRequest,
     DtmTopicRequest,
 };
+use crate::WorkflowProgressStatus;
 
 #[derive(Debug, Clone)]
 pub struct DtmGrpcClient {
@@ -71,6 +73,65 @@ impl DtmGrpcClient {
         Ok(())
     }
 
+    pub async fn record_callback_workflow_progress(
+        &mut self,
+        context: &Context,
+        gid: impl Into<String>,
+        branch_id: impl Into<String>,
+        operation: impl Into<String>,
+        status: WorkflowProgressStatus,
+        data: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        let status = match status {
+            WorkflowProgressStatus::Succeeded => "succeed",
+            WorkflowProgressStatus::Failed => "failed",
+        };
+        self.register_branch(
+            context,
+            DtmBranchRequest {
+                gid: gid.into(),
+                trans_type: "workflow".to_owned(),
+                branch_id: branch_id.into(),
+                op: operation.into(),
+                data: [("status".to_owned(), status.to_owned())]
+                    .into_iter()
+                    .collect(),
+                busi_payload: data,
+            },
+        )
+        .await
+    }
+
+    pub async fn finish_callback_workflow(
+        &mut self,
+        context: &Context,
+        gid: impl Into<String>,
+        status: WorkflowProgressStatus,
+        rollback_reason: impl Into<String>,
+        result: &[u8],
+    ) -> anyhow::Result<()> {
+        let status = match status {
+            WorkflowProgressStatus::Succeeded => "succeed",
+            WorkflowProgressStatus::Failed => "failed",
+        };
+        self.submit(
+            context,
+            DtmRequest {
+                gid: gid.into(),
+                trans_type: "workflow".to_owned(),
+                req_extra: [
+                    ("status".to_owned(), status.to_owned()),
+                    ("rollback_reason".to_owned(), rollback_reason.into()),
+                    ("result".to_owned(), BASE64_STANDARD.encode(result)),
+                ]
+                .into_iter()
+                .collect(),
+                ..DtmRequest::default()
+            },
+        )
+        .await
+    }
+
     pub async fn prepare_workflow(
         &mut self,
         context: &Context,
@@ -82,6 +143,26 @@ impl DtmGrpcClient {
             .prepare_workflow(request)
             .await?
             .into_inner())
+    }
+
+    pub async fn query_callback_workflow(
+        &mut self,
+        context: &Context,
+        gid: impl Into<String>,
+        query_prepared: impl Into<String>,
+        custom_data: impl Into<String>,
+    ) -> anyhow::Result<DtmProgressesReply> {
+        self.prepare_workflow(
+            context,
+            DtmRequest {
+                gid: gid.into(),
+                trans_type: "workflow".to_owned(),
+                customed_data: custom_data.into(),
+                query_prepared: query_prepared.into(),
+                ..DtmRequest::default()
+            },
+        )
+        .await
     }
 
     pub async fn subscribe(

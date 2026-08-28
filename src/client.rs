@@ -1,9 +1,13 @@
 use std::collections::BTreeMap;
 
 use anyhow::Context as _;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 
-use crate::{BranchKind, KvEntry, Transaction, TransactionKind, TransactionOptions};
+use crate::{
+    BranchKind, KvEntry, Transaction, TransactionKind, TransactionOptions,
+    WorkflowProgressStatus,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateBranchRequest {
@@ -35,6 +39,49 @@ pub struct CreateTransactionRequest {
     pub metadata: BTreeMap<String, String>,
     #[serde(default)]
     pub options: TransactionOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallbackWorkflowProgress {
+    pub branch_id: String,
+    pub operation: String,
+    pub status: WorkflowProgressStatus,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallbackWorkflowSnapshot {
+    pub gid: String,
+    pub status: String,
+    pub rollback_reason: String,
+    pub result: Vec<u8>,
+    pub progresses: Vec<CallbackWorkflowProgress>,
+}
+
+#[derive(Deserialize)]
+struct CallbackWorkflowWire {
+    transaction: CallbackWorkflowTransactionWire,
+    #[serde(default)]
+    progresses: Vec<CallbackWorkflowProgressWire>,
+}
+
+#[derive(Deserialize)]
+struct CallbackWorkflowTransactionWire {
+    gid: String,
+    status: String,
+    #[serde(default)]
+    rollback_reason: String,
+    #[serde(default)]
+    result: String,
+}
+
+#[derive(Deserialize)]
+struct CallbackWorkflowProgressWire {
+    status: String,
+    #[serde(default)]
+    bin_data: String,
+    branch_id: String,
+    op: String,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +152,90 @@ impl DtmHttpClient {
             .and_then(serde_json::Value::as_str)
             .map(ToOwned::to_owned)
             .context("DTM newGid response did not contain gid")
+    }
+
+    pub async fn prepare_callback_workflow(
+        &self,
+        gid: &str,
+        query_prepared: &str,
+        custom_data: &str,
+    ) -> anyhow::Result<CallbackWorkflowSnapshot> {
+        let response = self
+            .authorized(
+                self.client
+                    .post(format!("{}/api/dtmsvr/prepareWorkflow", self.base_url))
+                    .json(&serde_json::json!({
+                        "gid": gid,
+                        "trans_type": "workflow",
+                        "query_prepared": query_prepared,
+                        "custom_data": custom_data,
+                    })),
+            )
+            .send()
+            .await?;
+        decode_callback_workflow(response).await
+    }
+
+    pub async fn record_callback_workflow_progress(
+        &self,
+        gid: &str,
+        branch_id: &str,
+        operation: &str,
+        status: WorkflowProgressStatus,
+        data: &[u8],
+    ) -> anyhow::Result<()> {
+        let data = std::str::from_utf8(data)
+            .context("HTTP callback workflow progress data must be UTF-8; use gRPC for binary data")?;
+        let status = match status {
+            WorkflowProgressStatus::Succeeded => "succeed",
+            WorkflowProgressStatus::Failed => "failed",
+        };
+        let response = self
+            .authorized(
+                self.client
+                    .post(format!("{}/api/dtmsvr/registerBranch", self.base_url))
+                    .json(&serde_json::json!({
+                        "gid": gid,
+                        "trans_type": "workflow",
+                        "branch_id": branch_id,
+                        "op": operation,
+                        "status": status,
+                        "data": data,
+                    })),
+            )
+            .send()
+            .await?;
+        decode_compat_success(response).await
+    }
+
+    pub async fn finish_callback_workflow(
+        &self,
+        gid: &str,
+        status: WorkflowProgressStatus,
+        rollback_reason: &str,
+        result: &[u8],
+    ) -> anyhow::Result<()> {
+        let status = match status {
+            WorkflowProgressStatus::Succeeded => "succeed",
+            WorkflowProgressStatus::Failed => "failed",
+        };
+        let response = self
+            .authorized(
+                self.client
+                    .post(format!("{}/api/dtmsvr/submit", self.base_url))
+                    .json(&serde_json::json!({
+                        "gid": gid,
+                        "trans_type": "workflow",
+                        "req_extra": {
+                            "status": status,
+                            "rollback_reason": rollback_reason,
+                            "result": BASE64_STANDARD.encode(result),
+                        },
+                    })),
+            )
+            .send()
+            .await?;
+        decode_compat_success(response).await
     }
 
     pub async fn subscribe_topic(
@@ -217,4 +348,49 @@ async fn decode_transaction(response: reqwest::Response) -> anyhow::Result<Trans
     anyhow::ensure!(status.is_success(), "DTM request failed with status {status}");
     let data = value.get("data").cloned().context("DTM response did not contain data")?;
     Ok(serde_json::from_value(data)?)
+}
+
+async fn decode_callback_workflow(
+    response: reqwest::Response,
+) -> anyhow::Result<CallbackWorkflowSnapshot> {
+    let status = response.status();
+    let wire: CallbackWorkflowWire = response.json().await?;
+    anyhow::ensure!(
+        status.is_success(),
+        "DTM callback workflow query failed with status {status}"
+    );
+    let result = if wire.transaction.result.is_empty() {
+        Vec::new()
+    } else {
+        BASE64_STANDARD
+            .decode(wire.transaction.result)
+            .context("DTM callback workflow result is not valid base64")?
+    };
+    let progresses = wire
+        .progresses
+        .into_iter()
+        .map(|progress| {
+            let status = match progress.status.as_str() {
+                "succeed" | "succeeded" => WorkflowProgressStatus::Succeeded,
+                "failed" => WorkflowProgressStatus::Failed,
+                _ => anyhow::bail!("DTM callback workflow progress has invalid status"),
+            };
+            let data = BASE64_STANDARD
+                .decode(progress.bin_data)
+                .context("DTM callback workflow progress is not valid base64")?;
+            Ok(CallbackWorkflowProgress {
+                branch_id: progress.branch_id,
+                operation: progress.op,
+                status,
+                data,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(CallbackWorkflowSnapshot {
+        gid: wire.transaction.gid,
+        status: wire.transaction.status,
+        rollback_reason: wire.transaction.rollback_reason,
+        result,
+        progresses,
+    })
 }

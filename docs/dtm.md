@@ -146,4 +146,4 @@ Saga 端点只接受 `SagaAction` 分支，并要求补偿地址。
 
 ## 当前边界
 
-已支持内存、SQLite、PostgreSQL 与 MySQL 存储，Saga、TCC、Workflow、二阶段消息和 XA 协调状态机，HTTP 分支调用、超时、重试、分支屏障、关系型数据库恢复租约、版本化 KV、topic 订阅、自动恢复 worker、原生 Roze HTTP/gRPC 控制面和审计事件。Redis 后端、完整 XA 资源管理器、回调式 Workflow、其他语言 SDK 和管理 Dashboard 仍属于后续扩展；gRPC 适配器仍需完成编译与跨语言互操作验证。
+已支持内存、SQLite、PostgreSQL 与 MySQL 存储，Saga、TCC、静态及 callback Workflow、二阶段消息和 XA 协调状态机，HTTP 分支调用、超时、重试、分支屏障、关系型数据库恢复租约、版本化 KV、topic 订阅、自动恢复 worker、原生 Roze HTTP/gRPC 控制面和审计事件。Redis 后端、完整 XA 资源管理器、callback Workflow 主动 QueryPrepared 恢复、其他语言 SDK 和管理 Dashboard 仍属于后续扩展；gRPC 适配器仍需完成编译与跨语言互操作验证。
