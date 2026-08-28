@@ -1,0 +1,46 @@
+[package]
+name = "roze-dtm"
+description = "Roze distributed transaction manager core with TCC and Saga coordination"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+repository = "https://github.com/roze-team/roze-dtm"
+
+[workspace]
+members = ["service"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "1.0.0"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+config = { version = "0.15.24", default-features = false, features = ["json", "yaml", "toml"] }
+http = "1"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "query", "rustls", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "sqlite", "postgres", "mysql"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tower = { version = "0.5.3", features = ["limit", "timeout", "util"] }
+tracing = "0.1"
+roze-config = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
+roze-health = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
+roze-http = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
+roze-log = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
+roze-metrics = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
+roze-result = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
+roze-service = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true

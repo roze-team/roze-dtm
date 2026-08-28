@@ -1,0 +1,25 @@
+[package]
+name = "roze-dtm-service"
+description = "Standalone Roze DTM control-plane service"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+config.workspace = true
+http.workspace = true
+roze-dtm = { path = ".." }
+roze-config.workspace = true
+roze-health.workspace = true
+roze-http.workspace = true
+roze-log.workspace = true
+roze-metrics.workspace = true
+roze-result.workspace = true
+roze-service.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tracing.workspace = true

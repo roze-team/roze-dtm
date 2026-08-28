@@ -1,0 +1,7 @@
+Exception calling "ReadAllText" with "1" argument(s): "Could not find file 'D:\Alion\roze\LICENSE'."
+At line:1 char:55
++ ... UTF8Encoding]::new(); [IO.File]::ReadAllText('D:\Alion\roze\LICENSE')
++                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:) [], MethodInvocationException
+    + FullyQualifiedErrorId : FileNotFoundException
+ 
