@@ -42,3 +42,6 @@ application:
     max_retry_backoff_ms: 30000
     branch_call_timeout_ms: 5000
     transaction_timeout_ms: 60000
+    # alert_webhook_url: env://ROZE_DTM_ALERT_WEBHOOK_URL
+    alert_retry_limit: 3
+    alert_webhook_timeout_ms: 3000

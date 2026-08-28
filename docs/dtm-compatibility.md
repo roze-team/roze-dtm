@@ -51,6 +51,7 @@
 - `proto/dtmgimp.proto` 固定与上游兼容的 gRPC service、message 和字段号；Roze 服务端和 Rust 客户端覆盖全部 9 个 RPC，并共享 HTTP 控制面的存储、鉴权与生命周期。发布前仍需完成禁编译窗口之后的互操作测试。
 - gRPC 事务扩展字段会持久化；逐事务重试间隔、请求超时、Saga 重试上限和分支 Header 已接入核心执行器。`WaitResult=false` 的 Submit/Abort 会先持久化明确的 `Succeeding`/`Aborting` 决策，再由带租约的恢复 worker 异步推进；`Prepared` 不会被后台线程猜测为提交，`WaitResult=true` 同步等待。callback Workflow 已支持复合进度键、二进制结果、`ReqExtra` 终态和恢复 worker 主动调用 HTTP/JSON-RPC/gRPC `QueryPrepared`；重试调度在五种存储中原子持久化。真实跨语言互操作和故障注入仍需在禁编译窗口后验证。
 - Message 分支支持 `topic://name`，提交时从持久化订阅快照展开为一个或多个 HTTP 分支；订阅变化不会改写已经提交的事务。兼容层同时支持上游秒单位 `custom_data.delay`，Web SDK 提供 `messageDelayCustomData` 避免手写单位换算。
+- 上游 `AlertWebHook` 对应 `application.dtm.alert_webhook_url`。达到 `alert_retry_limit` 后发送 `gid/status/branch/error/retry_count`；Roze 会移除 `branch` 查询串并禁止在日志、指标和 Dashboard 暴露 Webhook URL 或原始依赖错误。告警投递失败不影响事务状态机。
 - Redis 存储复用 Roze standalone/Cluster 拓扑，事务使用单调 revision 与 payload CAS；恢复租约使用服务端时间和单调 epoch，恢复事务、Workflow 与屏障写入在同槽 Lua 中原子校验 owner/epoch/expiry。建连与命令统一受可配置超时限制；真实 Cluster、断连恢复、过期接管和长耗时 fencing 证据尚待补齐。
 - JSON-RPC 始终返回 HTTP 200，并通过标准 `error.code` 表示协议或操作失败；语法错误返回 `-32700`，无效请求返回 `-32600`。
 - `forceStop` 是不可自动恢复的管理操作，只应在确认人工介入后使用。

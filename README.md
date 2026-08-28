@@ -120,6 +120,8 @@ Saga 默认保持声明顺序；设置 `options.concurrent: true` 后，所有�
 
 Message 支持原生 `options.delay_millis` 延迟投递；显式 Dispatch/Submit 决策会先持久化为 `Succeeding`，到达“创建时间 + 延迟”前不会调用分支，恢复 worker 按该时间唤醒。dtm-labs 兼容入口解析 `custom_data: {"delay": 10}`，其中上游单位为秒。
 
+服务可通过 `application.dtm.alert_webhook_url` 启用 dtm-labs `AlertWebHook` 兼容告警。分支连续失败达到 `alert_retry_limit` 后会发送有界 JSON；分支 URL 查询串会被移除，Webhook URL 和依赖错误不会进入日志或 Dashboard，告警端故障也不会改变事务恢复结果。
+
 ## XA Resource Manager
 
 `roze_dtm::xa` 提供 MySQL 与 PostgreSQL 的 Rust 原生 XA 资源管理器。它在同一物理数据库连接中依次执行 XA/本地事务启动、`roze_xa_barriers` 幂等屏障、业务闭包、DTM 分支注册与 Prepare；注册或业务执行失败时失败闭合并回滚。二阶段接口提供 Commit/Rollback、重复 phase-2 的 `AlreadyResolved` 结果以及 prepared transaction 恢复扫描。`DtmHttpClient::xa_global_transaction` 对全局 Prepare、业务闭包和最终 Commit/Rollback 决策进行封装。

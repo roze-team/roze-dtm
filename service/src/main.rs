@@ -13,8 +13,8 @@ use anyhow::Context as _;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use roze_dtm::{
-    validate_redis_namespace, validate_saga_dependencies, Branch, BranchKind, BranchStatus,
-    BranchUrlPolicy, Dtm, DtmOptions, HttpBranchInvoker, InMemoryTransactionStore,
+    validate_redis_namespace, validate_saga_dependencies, AlertWebhookConfig, Branch, BranchKind,
+    BranchStatus, BranchUrlPolicy, Dtm, DtmOptions, HttpBranchInvoker, InMemoryTransactionStore,
     MySqlTransactionStore, PostgresTransactionStore, RedisTransactionStore,
     SqliteTransactionStore, Transaction, TransactionKind, TransactionOptions, TransactionStatus,
     TransactionStore, WorkflowProgress, WorkflowProgressStatus,
@@ -61,6 +61,12 @@ struct DtmConfig {
     worker_id: String,
     #[serde(default)]
     allowed_branch_origins: Vec<String>,
+    #[serde(default)]
+    alert_webhook_url: Option<String>,
+    #[serde(default = "default_alert_retry_limit")]
+    alert_retry_limit: u32,
+    #[serde(default = "default_alert_webhook_timeout_ms")]
+    alert_webhook_timeout_ms: u64,
 }
 
 impl Default for DtmConfig {
@@ -78,6 +84,9 @@ impl Default for DtmConfig {
             recovery_lease_ttl_ms: default_recovery_lease_ttl_ms(),
             worker_id: default_worker_id(),
             allowed_branch_origins: Vec::new(),
+            alert_webhook_url: None,
+            alert_retry_limit: default_alert_retry_limit(),
+            alert_webhook_timeout_ms: default_alert_webhook_timeout_ms(),
         }
     }
 }
@@ -148,6 +157,7 @@ impl DtmConfig {
         );
         BranchUrlPolicy::from_allowed_origins(&self.allowed_branch_origins)
             .context("application.dtm.allowed_branch_origins is invalid")?;
+        self.alert_webhook_config()?;
         match self.store.kind {
             StoreKind::Memory => anyhow::ensure!(
                 !production,
@@ -171,6 +181,25 @@ impl DtmConfig {
             branch_call_timeout_millis: self.branch_call_timeout_ms,
             transaction_timeout_millis: self.transaction_timeout_ms,
         }
+    }
+
+    fn alert_webhook_config(&self) -> anyhow::Result<Option<AlertWebhookConfig>> {
+        let Some(url) = self.alert_webhook_url.as_deref() else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            !url.trim().is_empty(),
+            "application.dtm.alert_webhook_url must not be empty"
+        );
+        let config = AlertWebhookConfig {
+            url: url.to_owned(),
+            retry_limit: self.alert_retry_limit,
+            timeout: Duration::from_millis(self.alert_webhook_timeout_ms),
+        };
+        config
+            .validate()
+            .context("application.dtm alert webhook configuration is invalid")?;
+        Ok(Some(config))
     }
 }
 
@@ -675,9 +704,10 @@ async fn main() -> anyhow::Result<()> {
     };
     let branch_url_policy =
         BranchUrlPolicy::from_allowed_origins(&config.application.dtm.allowed_branch_origins)?;
-    let invoker = HttpBranchInvoker::with_timeout_and_policy(
+    let invoker = HttpBranchInvoker::with_timeout_policy_and_alert(
         Duration::from_millis(config.application.dtm.branch_call_timeout_ms),
         branch_url_policy.clone(),
+        config.application.dtm.alert_webhook_config()?,
     )?;
     let dtm: Arc<DtmRuntime> = Arc::new(Dtm::with_options(
         store,
@@ -2712,6 +2742,12 @@ fn is_valid_release_revision(value: &str) -> bool {
 const fn default_max_attempts() -> u32 {
     5
 }
+const fn default_alert_retry_limit() -> u32 {
+    3
+}
+const fn default_alert_webhook_timeout_ms() -> u64 {
+    3_000
+}
 const fn default_retry_backoff_ms() -> u64 {
     1_000
 }
@@ -2843,6 +2879,36 @@ mod tests {
         config.store.redis_namespace = "safe-slot".to_owned();
         config.store.redis_operation_timeout_ms = 0;
         assert!(config.validate(false).is_err());
+    }
+
+    #[test]
+    fn alert_webhook_configuration_is_optional_bounded_and_secret_referenced() {
+        let mut config = DtmConfig {
+            allowed_branch_origins: vec!["http://inventory".to_owned()],
+            ..DtmConfig::default()
+        };
+        assert!(config.alert_webhook_config().expect("disabled alert").is_none());
+
+        config.alert_webhook_url = Some("https://alerts.example.com/dtm?token=secret".to_owned());
+        let alert = config
+            .alert_webhook_config()
+            .expect("valid alert configuration")
+            .expect("enabled alert");
+        assert_eq!(alert.retry_limit, 3);
+        assert_eq!(alert.timeout, Duration::from_secs(3));
+
+        config.alert_retry_limit = 0;
+        assert!(config.alert_webhook_config().is_err());
+        config.alert_retry_limit = 3;
+        config.alert_webhook_timeout_ms = 0;
+        assert!(config.alert_webhook_config().is_err());
+        config.alert_webhook_timeout_ms = 3_000;
+        config.alert_webhook_url = Some("file:///tmp/alert".to_owned());
+        assert!(config.alert_webhook_config().is_err());
+
+        let production = include_str!("../config.production.yaml");
+        assert!(production.contains("env://ROZE_DTM_ALERT_WEBHOOK_URL"));
+        assert!(!production.contains("https://alerts.example.com"));
     }
 
     #[test]

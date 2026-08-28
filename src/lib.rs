@@ -956,6 +956,52 @@ pub trait BranchInvoker: Clone + Send + Sync + 'static {
     ) -> anyhow::Result<WorkflowCallbackResult> {
         anyhow::bail!("workflow callback invocation is not supported by this invoker")
     }
+
+    async fn notify_branch_failure(&self, _alert: &BranchFailureAlert) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchFailureAlert {
+    pub gid: String,
+    pub status: String,
+    pub branch: String,
+    pub error: String,
+    pub retry_count: u32,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct AlertWebhookConfig {
+    pub url: String,
+    pub retry_limit: u32,
+    pub timeout: Duration,
+}
+
+impl std::fmt::Debug for AlertWebhookConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AlertWebhookConfig")
+            .field("url", &"[REDACTED]")
+            .field("retry_limit", &self.retry_limit)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
+impl AlertWebhookConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        parse_branch_url(&self.url).context("invalid alert webhook URL")?;
+        anyhow::ensure!(
+            (1..=10_000).contains(&self.retry_limit),
+            "alert webhook retry limit must be between 1 and 10000"
+        );
+        anyhow::ensure!(
+            (Duration::from_millis(1)..=Duration::from_secs(120)).contains(&self.timeout),
+            "alert webhook timeout must be between 1 and 120000 milliseconds"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -968,11 +1014,30 @@ impl BranchInvoker for NoopBranchInvoker {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpBranchInvoker {
     client: reqwest::Client,
     url_policy: BranchUrlPolicy,
     default_timeout: Option<Duration>,
+    alert_webhook: Option<AlertWebhook>,
+}
+
+#[derive(Clone)]
+struct AlertWebhook {
+    client: reqwest::Client,
+    url: String,
+    retry_limit: u32,
+}
+
+impl std::fmt::Debug for HttpBranchInvoker {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HttpBranchInvoker")
+            .field("url_policy", &self.url_policy)
+            .field("default_timeout", &self.default_timeout)
+            .field("alert_webhook_configured", &self.alert_webhook.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1028,6 +1093,7 @@ impl HttpBranchInvoker {
             client: branch_http_client(None).expect("default HTTP client configuration is valid"),
             url_policy: BranchUrlPolicy::allow_all(),
             default_timeout: None,
+            alert_webhook: None,
         }
     }
 
@@ -1039,10 +1105,29 @@ impl HttpBranchInvoker {
         timeout: Duration,
         url_policy: BranchUrlPolicy,
     ) -> anyhow::Result<Self> {
+        Self::with_timeout_policy_and_alert(timeout, url_policy, None)
+    }
+
+    pub fn with_timeout_policy_and_alert(
+        timeout: Duration,
+        url_policy: BranchUrlPolicy,
+        alert_webhook: Option<AlertWebhookConfig>,
+    ) -> anyhow::Result<Self> {
+        let alert_webhook = alert_webhook
+            .map(|config| {
+                config.validate()?;
+                Ok(AlertWebhook {
+                    client: branch_http_client(Some(config.timeout))?,
+                    url: config.url,
+                    retry_limit: config.retry_limit,
+                })
+            })
+            .transpose()?;
         Ok(Self {
             client: branch_http_client(Some(timeout))?,
             url_policy,
             default_timeout: Some(timeout),
+            alert_webhook,
         })
     }
 }
@@ -1103,6 +1188,22 @@ impl BranchInvoker for HttpBranchInvoker {
             }
         }
     }
+
+    async fn notify_branch_failure(&self, alert: &BranchFailureAlert) -> anyhow::Result<()> {
+        let Some(webhook) = &self.alert_webhook else {
+            return Ok(());
+        };
+        if !branch_alert_due(alert.retry_count, webhook.retry_limit) {
+            return Ok(());
+        }
+        let response = webhook.client.post(&webhook.url).json(alert).send().await?;
+        anyhow::ensure!(response.status().is_success(), "alert webhook rejected notification");
+        Ok(())
+    }
+}
+
+const fn branch_alert_due(retry_count: u32, retry_limit: u32) -> bool {
+    retry_count >= retry_limit
 }
 
 impl HttpBranchInvoker {
@@ -3423,7 +3524,8 @@ where
                 branch.status = BranchStatus::Running;
                 branch.attempts = branch.attempts.saturating_add(1);
                 let action = branch.action.clone();
-                self.invoke_branch(&execution_options, branch, &action).await
+                self.invoke_branch(&execution_options, &tx.gid, tx.status, branch, &action)
+                    .await
             };
             match action_result {
                 Ok(()) => {
@@ -3497,7 +3599,13 @@ where
                     if let Some(compensate) = branch.compensate.clone() {
                         branch.attempts = branch.attempts.saturating_add(1);
                         if self
-                            .invoke_url(&execution_options, branch, &compensate)
+                            .invoke_url(
+                                &execution_options,
+                                &tx.gid,
+                                tx.status,
+                                branch,
+                                &compensate,
+                            )
                             .await
                             .is_err()
                         {
@@ -3597,6 +3705,7 @@ where
             let mut tasks = tokio::task::JoinSet::new();
             for index in ready {
                 let invoker = self.invoker.clone();
+                let gid = tx.gid.clone();
                 let options = execution_options.clone();
                 let mut branch = tx.branches[index].clone();
                 let action = branch.action.clone();
@@ -3623,6 +3732,14 @@ where
                             retry_backoff_millis,
                             max_retry_backoff_millis,
                         );
+                        notify_branch_failure(
+                            &invoker,
+                            &gid,
+                            TransactionStatus::Succeeding,
+                            &branch,
+                            &action,
+                        )
+                        .await;
                     }
                     (index, branch, succeeded)
                 });
@@ -3738,6 +3855,7 @@ where
             let mut tasks = tokio::task::JoinSet::new();
             for index in ready {
                 let invoker = self.invoker.clone();
+                let gid = tx.gid.clone();
                 let options = execution_options.clone();
                 let mut branch = tx.branches[index].clone();
                 let compensate = branch
@@ -3767,6 +3885,14 @@ where
                             retry_backoff_millis,
                             max_retry_backoff_millis,
                         );
+                        notify_branch_failure(
+                            &invoker,
+                            &gid,
+                            TransactionStatus::Aborting,
+                            &branch,
+                            &compensate,
+                        )
+                        .await;
                     }
                     (index, branch, succeeded)
                 });
@@ -3820,7 +3946,7 @@ where
                     branch.attempts = branch.attempts.saturating_add(1);
                     let action = branch.action.clone();
                     match self
-                        .invoke_branch(&execution_options, branch, &action)
+                        .invoke_branch(&execution_options, &tx.gid, tx.status, branch, &action)
                         .await
                     {
                         Ok(()) => {
@@ -3881,7 +4007,7 @@ where
                 })?;
                 branch.attempts = branch.attempts.saturating_add(1);
                 match self
-                    .invoke_url(&execution_options, branch, &confirm)
+                    .invoke_url(&execution_options, &tx.gid, tx.status, branch, &confirm)
                     .await
                 {
                     Ok(()) => {
@@ -3936,7 +4062,7 @@ where
                         })?;
                     branch.attempts = branch.attempts.saturating_add(1);
                     match self
-                        .invoke_url(&execution_options, branch, &cancel)
+                        .invoke_url(&execution_options, &tx.gid, tx.status, branch, &cancel)
                         .await
                     {
                         Ok(()) => {
@@ -4042,7 +4168,13 @@ where
             tx.branches[index].status = BranchStatus::Running;
             tx.branches[index].attempts = tx.branches[index].attempts.saturating_add(1);
             if self
-                .invoke_branch(&execution_options, &mut tx.branches[index], &action)
+                .invoke_branch(
+                    &execution_options,
+                    &tx.gid,
+                    tx.status,
+                    &mut tx.branches[index],
+                    &action,
+                )
                 .await
                 .is_err()
             {
@@ -4100,7 +4232,13 @@ where
                 })?;
                 branch.attempts = branch.attempts.saturating_add(1);
                 if self
-                    .invoke_url(&execution_options, branch, &compensate)
+                    .invoke_url(
+                        &execution_options,
+                        &tx.gid,
+                        tx.status,
+                        branch,
+                        &compensate,
+                    )
                     .await
                     .is_err()
                 {
@@ -4154,7 +4292,7 @@ where
                 branch.attempts = branch.attempts.saturating_add(1);
                 let action = branch.action.clone();
                 if self
-                    .invoke_branch(&execution_options, branch, &action)
+                    .invoke_branch(&execution_options, &tx.gid, tx.status, branch, &action)
                     .await
                     .is_err()
                 {
@@ -4224,7 +4362,7 @@ where
                 let commit = xa_phase2_callback_url(&commit, &tx.gid, &branch.id, "commit")?;
                 branch.attempts = branch.attempts.saturating_add(1);
                 if self
-                    .invoke_url(&execution_options, branch, &commit)
+                    .invoke_url(&execution_options, &tx.gid, tx.status, branch, &commit)
                     .await
                     .is_err()
                 {
@@ -4268,7 +4406,7 @@ where
                     xa_phase2_callback_url(&rollback, &tx.gid, &branch.id, "rollback")?;
                 branch.attempts = branch.attempts.saturating_add(1);
                 if self
-                    .invoke_url(&execution_options, branch, &rollback)
+                    .invoke_url(&execution_options, &tx.gid, tx.status, branch, &rollback)
                     .await
                     .is_err()
                 {
@@ -4612,6 +4750,8 @@ where
     async fn invoke_branch(
         &self,
         options: &TransactionOptions,
+        gid: &str,
+        transaction_status: TransactionStatus,
         branch: &mut Branch,
         url: &str,
     ) -> anyhow::Result<()> {
@@ -4633,6 +4773,8 @@ where
                         .max_retry_backoff_millis
                         .max(retry_backoff_millis),
                 );
+                self.notify_branch_failure(gid, transaction_status, branch, url)
+                    .await;
                 Err(anyhow::anyhow!("branch call failed"))
             }
         }
@@ -4641,10 +4783,55 @@ where
     async fn invoke_url(
         &self,
         options: &TransactionOptions,
+        gid: &str,
+        transaction_status: TransactionStatus,
         branch: &mut Branch,
         url: &str,
     ) -> anyhow::Result<()> {
-        self.invoke_branch(options, branch, url).await
+        self.invoke_branch(options, gid, transaction_status, branch, url)
+            .await
+    }
+
+    async fn notify_branch_failure(
+        &self,
+        gid: &str,
+        transaction_status: TransactionStatus,
+        branch: &Branch,
+        url: &str,
+    ) {
+        notify_branch_failure(
+            &self.invoker,
+            gid,
+            transaction_status,
+            branch,
+            url,
+        )
+        .await;
+    }
+}
+
+async fn notify_branch_failure<I: BranchInvoker>(
+    invoker: &I,
+    gid: &str,
+    transaction_status: TransactionStatus,
+    branch: &Branch,
+    url: &str,
+) {
+    let alert = BranchFailureAlert {
+        gid: gid.to_owned(),
+        status: transaction_status_name(transaction_status).to_owned(),
+        branch: alert_branch_url(url),
+        error: "branch_call_failed".to_owned(),
+        retry_count: branch.attempts,
+    };
+    if invoker.notify_branch_failure(&alert).await.is_err() {
+        tracing::warn!(
+            event = "dtm.branch.alert.failed",
+            error_kind = "alert_webhook_failed",
+            transaction_status = alert.status,
+            retry_count = alert.retry_count,
+            "DTM branch failure alert could not be delivered"
+        );
     }
 }
 
@@ -5200,6 +5387,28 @@ fn record_branch_failure(
     branch.next_retry_millis = Some(current_millis().saturating_add(backoff));
 }
 
+fn alert_branch_url(value: &str) -> String {
+    let Ok(mut url) = parse_branch_url(value) else {
+        return "redacted".to_owned();
+    };
+    // Query strings commonly carry signatures or credentials. The alert keeps
+    // the upstream `branch` field while removing that sensitive component.
+    url.set_query(None);
+    url.into()
+}
+
+const fn transaction_status_name(status: TransactionStatus) -> &'static str {
+    match status {
+        TransactionStatus::Submitted => "submitted",
+        TransactionStatus::Trying => "trying",
+        TransactionStatus::Prepared => "prepared",
+        TransactionStatus::Succeeding => "submitted",
+        TransactionStatus::Succeeded => "succeed",
+        TransactionStatus::Aborting => "aborting",
+        TransactionStatus::Aborted | TransactionStatus::Failed => "failed",
+    }
+}
+
 fn transaction_due(tx: &Transaction, now: u64) -> bool {
     if tx.kind == TransactionKind::Message
         && tx.status == TransactionStatus::Succeeding
@@ -5314,10 +5523,16 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
+    struct RecordingFailingAlertInvoker {
+        alerts: Arc<Mutex<Vec<BranchFailureAlert>>>,
+    }
+
+    #[derive(Clone, Default)]
     struct ConcurrentSagaInvoker {
         active: Arc<AtomicUsize>,
         max_active: Arc<AtomicUsize>,
         events: Arc<Mutex<Vec<String>>>,
+        alerts: Arc<Mutex<Vec<BranchFailureAlert>>>,
         fail_url: Option<String>,
     }
 
@@ -5396,6 +5611,21 @@ mod tests {
     }
 
     #[async_trait]
+    impl BranchInvoker for RecordingFailingAlertInvoker {
+        async fn invoke(&self, _url: &str, _payload: &serde_json::Value) -> anyhow::Result<()> {
+            anyhow::bail!("injected branch failure")
+        }
+
+        async fn notify_branch_failure(&self, alert: &BranchFailureAlert) -> anyhow::Result<()> {
+            self.alerts
+                .lock()
+                .expect("recording alert lock")
+                .push(alert.clone());
+            anyhow::bail!("injected alert delivery failure")
+        }
+    }
+
+    #[async_trait]
     impl BranchInvoker for ConcurrentSagaInvoker {
         async fn invoke(&self, url: &str, _payload: &serde_json::Value) -> anyhow::Result<()> {
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
@@ -5413,6 +5643,14 @@ mod tests {
             if self.fail_url.as_deref() == Some(url) {
                 anyhow::bail!("injected concurrent Saga failure");
             }
+            Ok(())
+        }
+
+        async fn notify_branch_failure(&self, alert: &BranchFailureAlert) -> anyhow::Result<()> {
+            self.alerts
+                .lock()
+                .expect("concurrent Saga alerts lock")
+                .push(alert.clone());
             Ok(())
         }
     }
@@ -5465,6 +5703,7 @@ mod tests {
         };
         let max_active = Arc::clone(&invoker.max_active);
         let events = Arc::clone(&invoker.events);
+        let alerts = Arc::clone(&invoker.alerts);
         let dtm = Dtm::with_invoker(InMemoryTransactionStore::new(), invoker);
         let mut transaction = Transaction::saga(
             "gid-saga-concurrent",
@@ -5506,6 +5745,84 @@ mod tests {
         assert!(events.iter().any(|event| event == "start:compensate-a"));
         assert!(events.iter().any(|event| event == "start:compensate-b"));
         assert!(!events.iter().any(|event| event == "start:compensate-c"));
+        drop(events);
+        let alerts = alerts.lock().expect("concurrent Saga alerts lock");
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].gid, "gid-saga-concurrent");
+        assert_eq!(alerts[0].status, "submitted");
+        assert_eq!(alerts[0].branch, "redacted");
+        assert_eq!(alerts[0].error, "branch_call_failed");
+        assert_eq!(alerts[0].retry_count, 1);
+    }
+
+    #[test]
+    fn alert_webhook_config_is_bounded_and_debug_redacts_url() {
+        let config = AlertWebhookConfig {
+            url: "https://alerts.example.com/dtm?token=secret".to_owned(),
+            retry_limit: 3,
+            timeout: Duration::from_secs(3),
+        };
+        config.validate().expect("valid alert webhook config");
+        let config_debug = format!("{config:?}");
+        assert!(config_debug.contains("[REDACTED]"));
+        assert!(!config_debug.contains("alerts.example.com"));
+        assert!(!config_debug.contains("secret"));
+        let invoker = HttpBranchInvoker::with_timeout_policy_and_alert(
+            Duration::from_secs(1),
+            BranchUrlPolicy::allow_all(),
+            Some(config),
+        )
+        .expect("alerting HTTP invoker");
+        let debug = format!("{invoker:?}");
+        assert!(debug.contains("alert_webhook_configured: true"));
+        assert!(!debug.contains("alerts.example.com"));
+        assert!(!debug.contains("secret"));
+
+        assert_eq!(
+            alert_branch_url("https://branch.example.com/action?signature=secret"),
+            "https://branch.example.com/action"
+        );
+        assert!(AlertWebhookConfig {
+            url: "file:///tmp/alert".to_owned(),
+            retry_limit: 3,
+            timeout: Duration::from_secs(3),
+        }
+        .validate()
+        .is_err());
+        assert!(!branch_alert_due(2, 3));
+        assert!(branch_alert_due(3, 3));
+        assert!(branch_alert_due(4, 3));
+    }
+
+    #[tokio::test]
+    async fn alert_delivery_failure_does_not_change_branch_recovery_state() {
+        let invoker = RecordingFailingAlertInvoker::default();
+        let alerts = Arc::clone(&invoker.alerts);
+        let dtm = Dtm::with_invoker(InMemoryTransactionStore::new(), invoker);
+        dtm.submit(Transaction::tcc(
+            "gid-alert-failure",
+            vec![Branch::tcc_try(
+                "inventory",
+                "https://inventory.example.com/try?signature=secret",
+                "https://inventory.example.com/confirm",
+                "https://inventory.example.com/cancel",
+                serde_json::json!({}),
+            )],
+        ))
+        .await
+        .expect("submit alert test transaction");
+
+        let transaction = dtm
+            .prepare_tcc("gid-alert-failure")
+            .await
+            .expect("branch failure remains a transaction result");
+
+        assert_eq!(transaction.status, TransactionStatus::Trying);
+        assert_eq!(transaction.branches[0].status, BranchStatus::Failed);
+        let alerts = alerts.lock().expect("recorded alert lock");
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].branch, "https://inventory.example.com/try");
+        assert_eq!(alerts[0].retry_count, 1);
     }
 
     #[tokio::test]

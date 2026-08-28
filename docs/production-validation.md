@@ -40,6 +40,8 @@ HTTP、JSON-RPC 和 gRPC 兼容协议需要使用固定上游客户端版本执�
 
 延迟 Message 的源码合同覆盖提交决策先持久化、到期前零分支调用、绝对恢复时间和到期后正常投递；HTTP/JSON-RPC/gRPC 兼容请求共享 `custom_data.delay` 秒到毫秒映射。受当前禁编译要求约束，Rust 测试及真实重启跨越投递点的验证尚未执行，状态为 `inconclusive`。
 
+分支重试告警源码合同覆盖顺序/并发失败路径、阈值、超时、URL 查询串移除、配置 Debug 脱敏和告警失败不干扰事务恢复。生产验收仍需使用真实 HTTPS 接收端验证阈值前零调用、阈值后重复通知、非 2xx、超时、断连、服务重启与 payload/log/Dashboard 泄漏检查；当前禁编译窗口内未执行，状态为 `inconclusive`。
+
 `scripts/production-http-contract-smoke.mjs` 可对已运行的生产候选执行 12 项只读检查：三类探针、指标、OpenAPI、未授权拒绝、授权统计、Dashboard 脱敏、XA 对账、部署修订号、dtm-labs HTTP 和 JSON-RPC。运行必须绑定完整 Git revision 和显式部署拓扑；服务端 `/api/dtmsvr/version` 返回的 `release_revision` 必须与 `ROZE_DTM_EXPECTED_REVISION` 完全一致。脚本会将 OpenAPI/指标快照及检查结果写入证据目录。`scripts/validate-production-evidence.py` 独立校验时间范围、拓扑、判定一致性、检查项唯一性、相对工件路径、字节数与 SHA-256；通过烟测仍只证明该次短时 HTTP 合同，不替代数据库故障注入或 24h/72h soak。
 
 ## XA Resource Manager

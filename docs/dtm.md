@@ -30,6 +30,9 @@ application:
     max_retry_backoff_ms: 30000
     branch_call_timeout_ms: 5000
     transaction_timeout_ms: 60000
+    alert_webhook_url: env://ROZE_DTM_ALERT_WEBHOOK_URL
+    alert_retry_limit: 3
+    alert_webhook_timeout_ms: 3000
 ```
 
 `allowed_branch_origins` 是所有环境的必填项，只接受精确的 HTTP(S) Origin，例如
@@ -37,6 +40,8 @@ application:
 Action、Confirm、Cancel、Compensate 和 callback `QueryPrepared` URL；实际调用会再次
 校验，并禁止 HTTP 重定向，避免通过分支地址或重定向访问未授权的内部端点。gRPC
 callback 使用对应的 `http://` 或 `https://` origin 加入同一白名单。
+
+`alert_webhook_url` 可选，对齐 dtm-labs 的 `AlertWebHook`。任一顺序或并发分支失败达到 `alert_retry_limit`（1–10000，默认 3）后，协调器以 POST JSON 发送 `gid`、兼容状态、去除查询串的 `branch`、固定错误分类和 `retry_count`；后续失败仍会再次告警。`alert_webhook_timeout_ms` 范围为 1–120000。Webhook URL 只允许无用户凭据和 fragment 的 HTTP(S)，建议使用 `env://ROZE_DTM_ALERT_WEBHOOK_URL`；Webhook 失败不会改变事务状态或推迟原分支恢复，只记录不含 URL、GID 和依赖错误正文的有界事件。
 
 生产环境禁止 `store.kind: memory`。持久化后端支持 `sqlite`、`postgres`、`mysql` 和 `redis`；数据库 URL scheme 必须与 kind 一致，`max_connections` 范围为 1–1000。Redis standalone 使用 `redis_url`，Cluster 使用一个或多个 `redis_cluster_urls`，两者仅接受 `redis://` 或 `rediss://`；Cluster 配置优先。`redis_namespace` 只允许 1–64 个 ASCII 字母、数字、`-`、`_`，用于构造显式 hash tag，禁止部署间共享命名空间。`redis_operation_timeout_ms` 范围为 1–120000，默认 5000，同时限制建连和每次 Redis 命令。`control_token` 至少 32 字节；`release_revision` 必须是当前部署对应的 40 位非零 Git revision，服务会规范化为小写并通过公开版本端点返回，用于生产证据绑定；`worker_id` 必须在同一部署中唯一。恢复租约时长至少是恢复周期的两倍。配置文件只保存 `env://` 引用，不保存明文密钥。
 
