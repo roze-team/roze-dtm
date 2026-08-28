@@ -41,7 +41,7 @@ export class RozeDtmCompatClient {
     this.baseUrl = url.toString().replace(/\/$/, "");
   }
 
-  version(options?: RequestOptions) { return this.raw<{ version: string }>("GET", "/api/dtmsvr/version", undefined, undefined, options, false); }
+  version(options?: RequestOptions) { return this.raw<{ version: string; release_revision: string | null }>("GET", "/api/dtmsvr/version", undefined, undefined, options, false); }
   newGid(options?: RequestOptions) { return this.compat<{ gid: string; dtm_result: "SUCCESS" }>("GET", "/api/dtmsvr/newGid", undefined, undefined, options); }
   query(gid: string, options?: RequestOptions) { return this.compat<{ transaction: Transaction; branches: Transaction["branches"]; dtm_result: "SUCCESS" }>("GET", "/api/dtmsvr/query", { gid }, undefined, options); }
   all(query: CompatAllQuery = {}, options?: RequestOptions) { return this.compat<{ transactions: Transaction[]; next_position: string; dtm_result: "SUCCESS" }>("GET", "/api/dtmsvr/all", query, undefined, options); }

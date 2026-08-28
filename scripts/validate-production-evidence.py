@@ -38,9 +38,17 @@ assert isinstance(topology.get("replica_count"), int) and topology["replica_coun
 assert isinstance(topology.get("dependencies"), list)
 
 checks = report["checks"]
-assert isinstance(checks, list) and len(checks) >= 10
+assert isinstance(checks, list) and len(checks) >= 12
 names = [item.get("name") for item in checks]
 assert len(names) == len(set(names))
+required_checks = {
+    "probe:/healthz", "probe:/startupz", "probe:/readyz",
+    "operations:metrics", "contract:openapi", "security:unauthorized-native",
+    "native:stats", "management:dashboard-redaction",
+    "management:xa-reconciliation", "compatibility:version-revision",
+    "compatibility:http", "compatibility:json-rpc",
+}
+assert required_checks <= set(names), {"missing_checks": sorted(required_checks - set(names))}
 for item in checks:
     assert set(item) == {"name", "outcome", "elapsed_ms", "detail"}
     assert isinstance(item["name"], str) and item["name"]

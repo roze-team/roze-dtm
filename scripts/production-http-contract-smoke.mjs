@@ -88,6 +88,15 @@ await check("management:xa-reconciliation", async () => {
   return `items=${payload.data.items.length}`;
 });
 
+await check("compatibility:version-revision", async () => {
+  const response = await request("/api/dtmsvr/version");
+  const payload = await json(response);
+  assert(response.status === 200, `version endpoint returned HTTP ${response.status}`);
+  assert(typeof payload?.version === "string" && payload.version.length > 0, "service version is missing");
+  assert(payload.release_revision === revision.toLowerCase(), `deployed revision ${payload.release_revision ?? "missing"} does not match expected revision`);
+  return `revision=${payload.release_revision}`;
+});
+
 await check("compatibility:http", async () => {
   const response = await request("/api/dtmsvr/newGid", true);
   const payload = await json(response);

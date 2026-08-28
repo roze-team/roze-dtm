@@ -51,6 +51,8 @@ struct DtmConfig {
     transaction_timeout_ms: u64,
     #[serde(default)]
     control_token: Option<String>,
+    #[serde(default)]
+    release_revision: Option<String>,
     #[serde(default = "default_recover_interval_ms")]
     recover_interval_ms: u64,
     #[serde(default = "default_recovery_lease_ttl_ms")]
@@ -71,6 +73,7 @@ impl Default for DtmConfig {
             branch_call_timeout_ms: default_branch_call_timeout_ms(),
             transaction_timeout_ms: default_transaction_timeout_ms(),
             control_token: None,
+            release_revision: None,
             recover_interval_ms: default_recover_interval_ms(),
             recovery_lease_ttl_ms: default_recovery_lease_ttl_ms(),
             worker_id: default_worker_id(),
@@ -107,6 +110,17 @@ impl DtmConfig {
                     .as_deref()
                     .is_some_and(|token| token.len() >= 32),
                 "application.dtm.control_token must contain at least 32 bytes in production"
+            );
+            anyhow::ensure!(
+                self.release_revision
+                    .as_deref()
+                    .is_some_and(is_valid_release_revision),
+                "application.dtm.release_revision must be a full non-zero Git revision in production"
+            );
+        } else if let Some(revision) = self.release_revision.as_deref() {
+            anyhow::ensure!(
+                is_valid_release_revision(revision),
+                "application.dtm.release_revision must be a full non-zero Git revision"
             );
         }
         anyhow::ensure!(
@@ -263,6 +277,7 @@ struct ControlState {
     dtm: Arc<DtmRuntime>,
     branch_url_policy: BranchUrlPolicy,
     control_token: Option<Arc<str>>,
+    release_revision: Option<Arc<str>>,
     lifecycle: Option<LifecycleState>,
     audit_history: Arc<DashboardAuditHistory>,
 }
@@ -676,6 +691,13 @@ async fn main() -> anyhow::Result<()> {
             .control_token
             .clone()
             .map(Arc::<str>::from),
+        release_revision: config
+            .application
+            .dtm
+            .release_revision
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .map(Arc::<str>::from),
         lifecycle: Some(group.lifecycle()),
         audit_history: Arc::new(DashboardAuditHistory::default()),
     };
@@ -914,8 +936,11 @@ async fn metrics() -> String {
     roze_metrics::http_metrics()
 }
 
-async fn compat_version() -> HttpResponse {
-    compat_response(serde_json::json!({"version": env!("CARGO_PKG_VERSION")}))
+async fn compat_version(State(state): State<ControlState>) -> HttpResponse {
+    compat_response(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "release_revision": state.release_revision.as_deref(),
+    }))
 }
 
 async fn compat_new_gid(State(state): State<ControlState>, headers: HeaderMap) -> HttpResponse {
@@ -2563,6 +2588,12 @@ fn unix_millis() -> u64 {
         .map_or(0, |duration| duration.as_millis() as u64)
 }
 
+fn is_valid_release_revision(value: &str) -> bool {
+    value.len() == 40
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && value.bytes().any(|byte| byte != b'0')
+}
+
 const fn default_max_attempts() -> u32 {
     5
 }
@@ -2642,6 +2673,7 @@ mod tests {
         assert!(config.validate(false).is_err());
         config.store.database_url = Some("sqlite://roze-dtm.db?mode=rwc".to_string());
         config.control_token = Some("x".repeat(32));
+        config.release_revision = Some("a".repeat(40));
         config.worker_id = "dtm-test-1".to_string();
         assert!(config.validate(true).is_err());
         config.allowed_branch_origins = vec!["http://inventory".to_string()];
@@ -2720,10 +2752,33 @@ mod tests {
         config.control_token = Some("short".to_string());
         assert!(config.validate(true).is_err());
         config.control_token = Some("x".repeat(32));
+        config.release_revision = Some("a".repeat(40));
         config.worker_id = "dtm-test-1".to_string();
         assert!(config.validate(true).is_err());
         config.allowed_branch_origins = vec!["http://inventory".to_string()];
         config.validate(true).expect("valid production config");
+    }
+
+    #[test]
+    fn production_requires_bound_release_revision() {
+        let mut config = DtmConfig::default();
+        config.store.kind = StoreKind::Sqlite;
+        config.store.database_url = Some("sqlite://roze-dtm.db?mode=rwc".to_string());
+        config.control_token = Some("x".repeat(32));
+        config.worker_id = "dtm-test-1".to_string();
+        config.allowed_branch_origins = vec!["http://inventory".to_string()];
+        assert!(config.validate(true).is_err());
+        for invalid in [
+            "short",
+            "0000000000000000000000000000000000000000",
+            "gggggggggggggggggggggggggggggggggggggggg",
+        ] {
+            config.release_revision = Some(invalid.to_owned());
+            assert!(config.validate(true).is_err());
+        }
+        config.release_revision =
+            Some("ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_owned());
+        config.validate(true).expect("valid release revision");
     }
 
     #[test]
@@ -3224,6 +3279,7 @@ mod tests {
             dtm,
             branch_url_policy,
             control_token: token.map(Arc::<str>::from),
+            release_revision: Some(Arc::<str>::from("a".repeat(40))),
             lifecycle: None,
             audit_history: Arc::new(DashboardAuditHistory::default()),
         })

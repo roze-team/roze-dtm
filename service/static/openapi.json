@@ -709,7 +709,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CompatPayload"
+                  "$ref": "#/components/schemas/CompatVersion"
                 }
               }
             }
@@ -2452,6 +2452,25 @@
         "properties": {
           "dtm_result": {
             "const": "SUCCESS"
+          }
+        }
+      },
+      "CompatVersion": {
+        "type": "object",
+        "required": [
+          "version",
+          "release_revision"
+        ],
+        "properties": {
+          "version": {
+            "type": "string"
+          },
+          "release_revision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-f]{40}$"
           }
         }
       },

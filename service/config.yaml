@@ -24,6 +24,7 @@ governance: {}
 
 application:
   dtm:
+    # Production requires release_revision: env://ROZE_DTM_RELEASE_REVISION.
     recover_interval_ms: 1000
     recovery_lease_ttl_ms: 5000
     worker_id: roze-dtm-local

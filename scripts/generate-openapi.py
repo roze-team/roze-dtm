@@ -137,6 +137,9 @@ schemas = {
     }},
     "CompatAdminRequest": {"type": "object", "required": ["gid"], "properties": {"gid": {"type": "string"}}},
     "CompatSuccess": {"type": "object", "required": ["dtm_result"], "properties": {"dtm_result": {"const": "SUCCESS"}}},
+    "CompatVersion": {"type": "object", "required": ["version", "release_revision"], "properties": {
+        "version": {"type": "string"}, "release_revision": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+    }},
     "CompatPayload": {"type": "object", "required": ["dtm_result"], "properties": {"dtm_result": {"enum": ["SUCCESS", "FAILURE"]}}, "additionalProperties": True},
     "JsonRpcRequest": {"type": "object", "required": ["jsonrpc", "id", "method"], "properties": {
         "jsonrpc": {"const": "2.0"}, "id": ref("JsonValue"), "method": {"enum": ["newGid", "prepare", "submit", "abort", "registerBranch"]}, "params": ref("JsonValue"),
@@ -197,7 +200,8 @@ compat_params = {
     "queryKV": [query("cat"), query("key")],
 }
 for name in compat_gets:
-    paths[f"/api/dtmsvr/{name}"] = {"get": operation("compat" + name[0].upper() + name[1:], "Compatibility", ref("CompatPayload"), params=compat_params.get(name), public=name == "version")}
+    response_schema = ref("CompatVersion") if name == "version" else ref("CompatPayload")
+    paths[f"/api/dtmsvr/{name}"] = {"get": operation("compat" + name[0].upper() + name[1:], "Compatibility", response_schema, params=compat_params.get(name), public=name == "version")}
 for name in ["prepare", "submit", "abort"]:
     paths[f"/api/dtmsvr/{name}"] = {"post": operation("compat" + name.title(), "Compatibility", ref("CompatSuccess"), body="CompatTransactionRequest")}
 for name in ["registerBranch", "registerTccBranch", "registerXaBranch"]:

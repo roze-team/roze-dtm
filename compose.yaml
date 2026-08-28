@@ -20,6 +20,7 @@ services:
         condition: service_healthy
     environment:
       ROZE_DTM_CONTROL_TOKEN: local-control-token-change-me-00000000
+      ROZE_DTM_RELEASE_REVISION: "${ROZE_DTM_RELEASE_REVISION:?set-ROZE_DTM_RELEASE_REVISION}"
       ROZE_DTM_WORKER_ID: roze-dtm-compose-1
       ROZE_DTM_DATABASE_URL: postgres://roze:roze-dtm-local@postgres:5432/roze_dtm
     ports:

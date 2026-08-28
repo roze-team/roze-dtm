@@ -30,7 +30,7 @@ python scripts/generate-openapi.py
 python scripts/validate-openapi.py
 ```
 
-对已经部署的生产候选服务执行只读合同烟测时，必须显式提供完整 Git revision、控制令牌、部署拓扑和证据目录：
+对已经部署的生产候选服务执行只读合同烟测时，必须显式提供完整 Git revision、控制令牌、部署拓扑和证据目录。部署时的 `ROZE_DTM_RELEASE_REVISION` 与烟测的 `ROZE_DTM_EXPECTED_REVISION` 必须是同一个 40 位 Git revision；烟测会读取服务版本端点并拒绝修订号不一致的候选：
 
 ```bash
 ROZE_DTM_BASE_URL=https://dtm.example.com \
@@ -42,7 +42,7 @@ node scripts/production-http-contract-smoke.mjs
 python scripts/validate-production-evidence.py target/dtm-http-evidence/http-contract-report.json
 ```
 
-该烟测不会创建事务，只读取探针、指标、OpenAPI、统计、Dashboard、XA 对账，并调用无持久副作用的 HTTP/JSON-RPC GID 生成。报告不记录令牌；OpenAPI 和指标快照使用 SHA-256 绑定，任何缺失或篡改都会被独立校验器拒绝。
+该烟测不会创建事务，只读取探针、指标、OpenAPI、统计、Dashboard、XA 对账和部署修订号，并调用无持久副作用的 HTTP/JSON-RPC GID 生成。报告不记录令牌；OpenAPI 和指标快照使用 SHA-256 绑定，任何缺失或篡改都会被独立校验器拒绝。
 
 设置以下变量后，工作区测试还会执行真实关系型数据库契约测试：
 
@@ -83,16 +83,16 @@ cargo run -p roze-dtm-service
 仓库提供 PostgreSQL 生产拓扑示例：
 
 ```bash
-docker compose up --build
+ROZE_DTM_RELEASE_REVISION=$(git rev-parse HEAD) docker compose up --build
 ```
 
 Redis standalone 拓扑示例使用独立 Compose 文件：
 
 ```bash
-docker compose -f compose.redis.yaml up --build
+ROZE_DTM_RELEASE_REVISION=$(git rev-parse HEAD) docker compose -f compose.redis.yaml up --build
 ```
 
-服务默认监听 HTTP `http://127.0.0.1:8090` 和 gRPC `127.0.0.1:36790`。Compose 中的令牌和数据库密码仅用于本地演示，部署前必须替换。生产配置模板位于 `service/config.production.yaml`。
+服务默认监听 HTTP `http://127.0.0.1:8090` 和 gRPC `127.0.0.1:36790`。Compose 中的令牌和数据库密码仅用于本地演示，部署前必须替换；Compose 还会强制要求 `ROZE_DTM_RELEASE_REVISION`。生产配置模板位于 `service/config.production.yaml`。
 
 ## 管理 Dashboard
 

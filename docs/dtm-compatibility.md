@@ -6,7 +6,7 @@
 
 | DTM 端点 | Roze 行为 |
 | --- | --- |
-| `GET /api/dtmsvr/version` | 返回服务版本 |
+| `GET /api/dtmsvr/version` | 返回包版本和配置的 40 位部署 Git revision；开发环境未配置时 revision 为 `null` |
 | `GET /api/dtmsvr/newGid` | 生成进程内单调唯一 GID |
 | `POST /api/dtmsvr/prepare` | 创建 Prepared TCC/XA/Message 事务 |
 | `POST /api/dtmsvr/submit` | 提交并推进 Saga/TCC/XA/Message/Workflow |

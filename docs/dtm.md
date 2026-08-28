@@ -14,6 +14,7 @@ rest:
 application:
   dtm:
     control_token: env://ROZE_DTM_CONTROL_TOKEN
+    release_revision: env://ROZE_DTM_RELEASE_REVISION
     recover_interval_ms: 1000
     recovery_lease_ttl_ms: 5000
     worker_id: env://ROZE_DTM_WORKER_ID
@@ -37,7 +38,7 @@ Action、Confirm、Cancel、Compensate 和 callback `QueryPrepared` URL；实际
 校验，并禁止 HTTP 重定向，避免通过分支地址或重定向访问未授权的内部端点。gRPC
 callback 使用对应的 `http://` 或 `https://` origin 加入同一白名单。
 
-生产环境禁止 `store.kind: memory`。持久化后端支持 `sqlite`、`postgres`、`mysql` 和 `redis`；数据库 URL scheme 必须与 kind 一致，`max_connections` 范围为 1–1000。Redis standalone 使用 `redis_url`，Cluster 使用一个或多个 `redis_cluster_urls`，两者仅接受 `redis://` 或 `rediss://`；Cluster 配置优先。`redis_namespace` 只允许 1–64 个 ASCII 字母、数字、`-`、`_`，用于构造显式 hash tag，禁止部署间共享命名空间。`redis_operation_timeout_ms` 范围为 1–120000，默认 5000，同时限制建连和每次 Redis 命令。`control_token` 至少 32 字节；`worker_id` 必须在同一部署中唯一。恢复租约时长至少是恢复周期的两倍。配置文件只保存 `env://` 引用，不保存明文密钥。
+生产环境禁止 `store.kind: memory`。持久化后端支持 `sqlite`、`postgres`、`mysql` 和 `redis`；数据库 URL scheme 必须与 kind 一致，`max_connections` 范围为 1–1000。Redis standalone 使用 `redis_url`，Cluster 使用一个或多个 `redis_cluster_urls`，两者仅接受 `redis://` 或 `rediss://`；Cluster 配置优先。`redis_namespace` 只允许 1–64 个 ASCII 字母、数字、`-`、`_`，用于构造显式 hash tag，禁止部署间共享命名空间。`redis_operation_timeout_ms` 范围为 1–120000，默认 5000，同时限制建连和每次 Redis 命令。`control_token` 至少 32 字节；`release_revision` 必须是当前部署对应的 40 位非零 Git revision，服务会规范化为小写并通过公开版本端点返回，用于生产证据绑定；`worker_id` 必须在同一部署中唯一。恢复租约时长至少是恢复周期的两倍。配置文件只保存 `env://` 引用，不保存明文密钥。
 
 Redis 生产配置示例见 `service/config.redis.production.yaml`。Redis 后端将事务、KV、屏障和租约分为四个 Hash，全部 key 共享显式 Cluster hash tag。租约脚本使用 Redis 服务端时间；首次获取或过期后重新获取会递增 epoch，同一 owner 在有效期内续租复用 epoch。恢复 worker 通过 fenced store 推进，事务 revision/payload CAS、Workflow 变更、屏障创建和释放均在同一 Lua 调用中校验 owner、epoch 与过期时间。事务扫描使用有界分批 `HSCAN`。当前仍需在禁编译窗口结束后执行真实 standalone/Cluster、过期接管和长耗时恢复故障测试，才能声明完整的多节点故障隔离证据。
 
