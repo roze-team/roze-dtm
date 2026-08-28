@@ -1,4 +1,11 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::Context as _;
 use http::{header::AUTHORIZATION, HeaderMap, StatusCode};
@@ -237,6 +244,8 @@ struct BranchRequest {
     cancel: Option<String>,
     #[serde(default)]
     payload: serde_json::Value,
+    #[serde(default)]
+    dependencies: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -273,6 +282,49 @@ struct TransactionStats {
 struct RecoveryResult {
     recovered: Vec<Transaction>,
     count: usize,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct CompatQuery {
+    gid: Option<String>,
+    #[serde(rename = "transType", alias = "trans_type")]
+    trans_type: Option<String>,
+    status: Option<String>,
+    position: usize,
+    limit: Option<usize>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct CompatTransactionRequest {
+    gid: String,
+    trans_type: String,
+    steps: Vec<BTreeMap<String, String>>,
+    payloads: Vec<serde_json::Value>,
+    timeout_to_fail: Option<u64>,
+    rollback_reason: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct CompatBranchRequest {
+    gid: String,
+    trans_type: String,
+    branch_id: String,
+    data: Option<String>,
+    confirm: Option<String>,
+    cancel: Option<String>,
+    url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct JsonRpcRequest {
+    jsonrpc: String,
+    id: serde_json::Value,
+    method: String,
+    #[serde(default)]
+    params: serde_json::Value,
 }
 
 #[tokio::main]
@@ -446,11 +498,38 @@ fn control_router(state: ControlState) -> Router {
         .route("/v1/saga", post(submit_saga))
         .route("/v1/saga/{gid}/start", post(start_saga))
         .route("/v1/saga/{gid}/abort", post(abort_saga))
+        .route("/v1/workflows", post(submit_workflow))
+        .route("/v1/workflows/{gid}/start", post(start_workflow))
+        .route("/v1/workflows/{gid}/abort", post(abort_workflow))
+        .route("/v1/messages", post(submit_message))
+        .route("/v1/messages/{gid}/prepare", post(prepare_message))
+        .route("/v1/messages/{gid}/dispatch", post(dispatch_message))
+        .route("/v1/messages/{gid}/abort", post(abort_message))
+        .route("/v1/xa", post(submit_xa))
+        .route("/v1/xa/{gid}/prepare", post(prepare_xa))
+        .route("/v1/xa/{gid}/commit", post(commit_xa))
+        .route("/v1/xa/{gid}/rollback", post(rollback_xa))
         .route("/v1/transactions", get(list_transactions))
         .route("/v1/transactions/{gid}", get(get_transaction))
         .route("/v1/transactions/{gid}/recover", post(recover_transaction))
+        .route("/v1/transactions/{gid}/force-stop", post(force_stop_transaction))
+        .route("/v1/transactions/{gid}/reset-retry", post(reset_retry_transaction))
         .route("/v1/recover", post(recover_all))
         .route("/v1/stats", get(stats))
+        .route("/api/dtmsvr/version", get(compat_version))
+        .route("/api/dtmsvr/newGid", get(compat_new_gid))
+        .route("/api/dtmsvr/query", get(compat_query))
+        .route("/api/dtmsvr/all", get(compat_all))
+        .route("/api/dtmsvr/prepare", post(compat_prepare))
+        .route("/api/dtmsvr/submit", post(compat_submit))
+        .route("/api/dtmsvr/abort", post(compat_abort))
+        .route("/api/dtmsvr/registerBranch", post(compat_register_branch))
+        .route("/api/dtmsvr/registerTccBranch", post(compat_register_branch))
+        .route("/api/dtmsvr/registerXaBranch", post(compat_register_branch))
+        .route("/api/dtmsvr/forceStop", post(compat_force_stop))
+        .route("/api/dtmsvr/resetNextCronTime", post(compat_reset_retry))
+        .route("/api/dtmsvr/resetCronTime", get(compat_reset_retry_batch))
+        .route("/api/json-rpc", post(json_rpc))
         .with_state(state)
 }
 
@@ -460,6 +539,412 @@ async fn health() -> HttpResponse {
 
 async fn metrics() -> String {
     roze_metrics::http_metrics()
+}
+
+async fn compat_version() -> HttpResponse {
+    compat_response(serde_json::json!({"version": env!("CARGO_PKG_VERSION")}))
+}
+
+async fn compat_new_gid(State(state): State<ControlState>, headers: HeaderMap) -> HttpResponse {
+    if !authorize(&state, &headers) {
+        return unauthorized_response();
+    }
+    compat_response(serde_json::json!({
+        "gid": generate_gid(),
+        "dtm_result": "SUCCESS"
+    }))
+}
+
+fn generate_gid() -> String {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{millis:x}{sequence:08x}")
+}
+
+async fn compat_query(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Query(query): Query<CompatQuery>,
+) -> HttpResponse {
+    if !authorize(&state, &headers) {
+        return unauthorized_response();
+    }
+    let Some(gid) = query.gid else {
+        return compat_failure("no gid specified");
+    };
+    match state.dtm.store().get_transaction(&gid).await {
+        Ok(Some(transaction)) => compat_response(serde_json::json!({
+            "transaction": &transaction,
+            "branches": &transaction.branches,
+            "dtm_result": "SUCCESS"
+        })),
+        Ok(None) => compat_failure("transaction not found"),
+        Err(_) => compat_failure("storage failure"),
+    }
+}
+
+async fn compat_all(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Query(query): Query<CompatQuery>,
+) -> HttpResponse {
+    if !authorize(&state, &headers) {
+        return unauthorized_response();
+    }
+    let limit = query.limit.unwrap_or(100).clamp(1, 200);
+    match state.dtm.list().await {
+        Ok(transactions) => {
+            let items = transactions
+                .into_iter()
+                .filter(|tx| {
+                    query.gid.as_deref().is_none_or(|gid| tx.gid == gid)
+                        && query
+                            .trans_type
+                            .as_deref()
+                            .is_none_or(|kind| kind_name(tx.kind) == kind)
+                        && query
+                            .status
+                            .as_deref()
+                            .is_none_or(|status| status_name(tx.status) == status)
+                })
+                .skip(query.position)
+                .take(limit)
+                .collect::<Vec<_>>();
+            compat_response(
+                serde_json::json!({"transactions": items, "next_position": query.position + limit, "dtm_result": "SUCCESS"}),
+            )
+        }
+        Err(_) => compat_failure("storage failure"),
+    }
+}
+
+fn compat_response(value: serde_json::Value) -> HttpResponse {
+    rest::json_response(StatusCode::OK, &value)
+}
+
+fn compat_failure(message: &str) -> HttpResponse {
+    rest::json_response(
+        StatusCode::BAD_REQUEST,
+        &serde_json::json!({"dtm_result": "FAILURE", "message": message}),
+    )
+}
+
+async fn compat_force_stop(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Json(request): Json<CompatTransactionRequest>,
+) -> HttpResponse {
+    compat_admin_operation(&state, &headers, &request.gid, true).await
+}
+
+async fn compat_reset_retry(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Json(request): Json<CompatTransactionRequest>,
+) -> HttpResponse {
+    compat_admin_operation(&state, &headers, &request.gid, false).await
+}
+
+async fn compat_admin_operation(
+    state: &ControlState,
+    headers: &HeaderMap,
+    gid: &str,
+    force_stop: bool,
+) -> HttpResponse {
+    if !authorize(state, headers) {
+        return unauthorized_response();
+    }
+    let result = if force_stop {
+        state.dtm.force_stop(gid).await
+    } else {
+        state.dtm.reset_retry(gid).await
+    };
+    match result {
+        Ok(_) => compat_response(serde_json::json!({"dtm_result": "SUCCESS"})),
+        Err(_) => compat_failure("administrative operation failed"),
+    }
+}
+
+async fn compat_reset_retry_batch(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Query(query): Query<CompatQuery>,
+) -> HttpResponse {
+    if !authorize(&state, &headers) {
+        return unauthorized_response();
+    }
+    let limit = query.limit.unwrap_or(100).clamp(1, 1_000);
+    match state.dtm.reset_retry_batch(limit).await {
+        Ok(reset) => compat_response(serde_json::json!({
+            "succeed_count": reset.len(),
+            "has_remaining": reset.len() == limit,
+            "dtm_result": "SUCCESS"
+        })),
+        Err(_) => compat_failure("batch retry reset failed"),
+    }
+}
+
+async fn compat_prepare(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Json(request): Json<CompatTransactionRequest>,
+) -> HttpResponse {
+    compat_write(&state, &headers, request, CompatOperation::Prepare).await
+}
+
+async fn compat_submit(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Json(request): Json<CompatTransactionRequest>,
+) -> HttpResponse {
+    compat_write(&state, &headers, request, CompatOperation::Submit).await
+}
+
+async fn compat_abort(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Json(request): Json<CompatTransactionRequest>,
+) -> HttpResponse {
+    compat_write(&state, &headers, request, CompatOperation::Abort).await
+}
+
+#[derive(Clone, Copy)]
+enum CompatOperation {
+    Prepare,
+    Submit,
+    Abort,
+}
+
+async fn compat_write(
+    state: &ControlState,
+    headers: &HeaderMap,
+    request: CompatTransactionRequest,
+    operation: CompatOperation,
+) -> HttpResponse {
+    if !authorize(state, headers) {
+        return unauthorized_response();
+    }
+    let gid = request.gid.clone();
+    let result = compat_apply(state, request, operation).await;
+    match result {
+        Ok(_) => compat_response(serde_json::json!({"dtm_result": "SUCCESS"})),
+        Err(_) => {
+            tracing::warn!(event = "dtm.compat.failed", gid, error_kind = "compat_operation", "DTM compatibility operation failed");
+            compat_failure("compatibility operation failed")
+        }
+    }
+}
+
+async fn compat_apply(
+    state: &ControlState,
+    request: CompatTransactionRequest,
+    operation: CompatOperation,
+) -> anyhow::Result<Transaction> {
+    let kind = parse_kind(&request.trans_type).map_err(anyhow::Error::msg)?;
+    let gid = request.gid.trim().to_owned();
+    anyhow::ensure!(!gid.is_empty() && gid.len() <= 128, "invalid gid");
+    let existing = state.dtm.store().get_transaction(&gid).await?;
+    if existing.is_none() {
+        let mut transaction = compat_transaction(kind, &request, &state.branch_url_policy)?;
+        if let Some(seconds) = request.timeout_to_fail {
+            transaction.timeout_millis = Some(seconds.saturating_mul(1_000));
+        }
+        if let Some(reason) = request.rollback_reason {
+            transaction.metadata.insert("rollback_reason".to_string(), reason);
+        }
+        state.dtm.submit(transaction).await?;
+    }
+    match (kind, operation) {
+        (TransactionKind::Tcc, CompatOperation::Prepare) => state.dtm.prepare_tcc(&gid).await,
+        (TransactionKind::Tcc, CompatOperation::Submit) => state.dtm.confirm_tcc(&gid).await,
+        (TransactionKind::Tcc, CompatOperation::Abort) => state.dtm.cancel_tcc(&gid).await,
+        (TransactionKind::Xa, CompatOperation::Prepare) => state.dtm.prepare_xa(&gid).await,
+        (TransactionKind::Xa, CompatOperation::Submit) => state.dtm.commit_xa(&gid).await,
+        (TransactionKind::Xa, CompatOperation::Abort) => state.dtm.rollback_xa(&gid).await,
+        (TransactionKind::Message, CompatOperation::Prepare) => state.dtm.prepare_message(&gid).await,
+        (TransactionKind::Message, CompatOperation::Submit) => state.dtm.dispatch_message(&gid).await,
+        (TransactionKind::Message, CompatOperation::Abort) => state.dtm.abort_message(&gid).await,
+        (TransactionKind::Saga, CompatOperation::Submit) => state.dtm.start_saga(&gid).await,
+        (TransactionKind::Saga, CompatOperation::Abort) => state.dtm.abort_saga(&gid).await,
+        (TransactionKind::Workflow, CompatOperation::Submit) => state.dtm.start_workflow(&gid).await,
+        (TransactionKind::Workflow, CompatOperation::Abort) => state.dtm.abort_workflow(&gid).await,
+        (_, CompatOperation::Prepare) => state
+            .dtm
+            .store()
+            .get_transaction(&gid)
+            .await?
+            .context("transaction not found"),
+    }
+}
+
+async fn compat_register_branch(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Json(request): Json<CompatBranchRequest>,
+) -> HttpResponse {
+    if !authorize(&state, &headers) {
+        return unauthorized_response();
+    }
+    let gid = request.gid.clone();
+    let branch = match compat_branch_from_request(&state, request) {
+        Ok(branch) => branch,
+        Err(_) => return compat_failure("invalid branch registration"),
+    };
+    match state.dtm.register_branch(&gid, branch).await {
+        Ok(_) => compat_response(serde_json::json!({"dtm_result": "SUCCESS"})),
+        Err(_) => compat_failure("branch registration failed"),
+    }
+}
+
+fn compat_branch_from_request(
+    state: &ControlState,
+    request: CompatBranchRequest,
+) -> anyhow::Result<Branch> {
+    let payload = request
+        .data
+        .as_deref()
+        .and_then(|data| serde_json::from_str(data).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let branch = match parse_kind(&request.trans_type) {
+        Ok(TransactionKind::Tcc) => {
+            let confirm = request.confirm.context("TCC confirm URL is required")?;
+            let cancel = request.cancel.context("TCC cancel URL is required")?;
+            if state.branch_url_policy.validate(&confirm).is_err()
+                || state.branch_url_policy.validate(&cancel).is_err()
+            {
+                anyhow::bail!("branch URL is not allowed");
+            }
+            let mut branch = Branch::tcc_try(request.branch_id, "", confirm, cancel, payload);
+            branch.status = BranchStatus::Succeeded;
+            branch
+        }
+        Ok(TransactionKind::Xa) => {
+            let url = request.url.context("XA phase2 URL is required")?;
+            if state.branch_url_policy.validate(&url).is_err() {
+                anyhow::bail!("branch URL is not allowed");
+            }
+            Branch::xa(request.branch_id, &url, url, payload)
+        }
+        _ => anyhow::bail!("dynamic registration supports tcc and xa"),
+    };
+    Ok(branch)
+}
+
+async fn json_rpc(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Json(request): Json<JsonRpcRequest>,
+) -> HttpResponse {
+    let id = request.id.clone();
+    if !authorize(&state, &headers) {
+        return json_rpc_error(id, -32001, "unauthorized");
+    }
+    if request.jsonrpc != "2.0" || request.id.is_null() {
+        return json_rpc_error(id, -32600, "invalid request");
+    }
+    let result = match request.method.as_str() {
+        "newGid" => Ok(serde_json::json!({"gid": generate_gid()})),
+        "prepare" | "submit" | "abort" => {
+            let operation = match request.method.as_str() {
+                "prepare" => CompatOperation::Prepare,
+                "submit" => CompatOperation::Submit,
+                _ => CompatOperation::Abort,
+            };
+            match serde_json::from_value::<CompatTransactionRequest>(request.params) {
+                Ok(params) => compat_apply(&state, params, operation)
+                    .await
+                    .map(|_| serde_json::json!({})),
+                Err(error) => Err(error.into()),
+            }
+        }
+        "registerBranch" => {
+            match serde_json::from_value::<CompatBranchRequest>(request.params) {
+                Ok(params) => {
+                    let gid = params.gid.clone();
+                    match compat_branch_from_request(&state, params) {
+                        Ok(branch) => state
+                            .dtm
+                            .register_branch(&gid, branch)
+                            .await
+                            .map(|_| serde_json::json!({})),
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error.into()),
+            }
+        }
+        _ => return json_rpc_error(id, -32601, "method not found"),
+    };
+    match result {
+        Ok(result) => rest::json_response(
+            StatusCode::OK,
+            &serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
+        ),
+        Err(_) => json_rpc_error(id, -32603, "operation failed"),
+    }
+}
+
+fn json_rpc_error(id: serde_json::Value, code: i32, message: &str) -> HttpResponse {
+    rest::json_response(
+        StatusCode::OK,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": code, "message": message}
+        }),
+    )
+}
+
+fn compat_transaction(
+    kind: TransactionKind,
+    request: &CompatTransactionRequest,
+    policy: &BranchUrlPolicy,
+) -> anyhow::Result<Transaction> {
+    let mut branches = Vec::with_capacity(request.steps.len());
+    for (index, step) in request.steps.iter().enumerate() {
+        let id = format!("{:02}", index + 1);
+        let payload = request
+            .payloads
+            .get(index)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let payload = match payload {
+            serde_json::Value::String(encoded) => {
+                serde_json::from_str(&encoded).unwrap_or(serde_json::Value::String(encoded))
+            }
+            payload => payload,
+        };
+        let action = step.get("action").context("step action is required")?;
+        policy.validate(action)?;
+        let branch = match kind {
+            TransactionKind::Saga => {
+                let compensate = step.get("compensate").context("step compensate is required")?;
+                policy.validate(compensate)?;
+                Branch::saga(id, action, compensate, payload)
+            }
+            TransactionKind::Workflow => {
+                let compensate = step.get("compensate").context("step compensate is required")?;
+                policy.validate(compensate)?;
+                let dependencies = if index == 0 { Vec::new() } else { vec![format!("{:02}", index)] };
+                Branch::workflow(id, action, compensate, dependencies, payload)
+            }
+            TransactionKind::Message => Branch::message(id, action, payload),
+            TransactionKind::Tcc | TransactionKind::Xa => {
+                anyhow::bail!("tcc and xa branches must be registered dynamically")
+            }
+        };
+        branches.push(branch);
+    }
+    match kind {
+        TransactionKind::Tcc => Ok(Transaction::tcc(&request.gid, Vec::new())),
+        TransactionKind::Xa => Ok(Transaction::xa(&request.gid, Vec::new())),
+        TransactionKind::Saga => Ok(Transaction::saga(&request.gid, branches)),
+        TransactionKind::Workflow => Ok(Transaction::workflow(&request.gid, branches)),
+        TransactionKind::Message => Ok(Transaction::message(&request.gid, branches)),
+    }
 }
 
 async fn ready(State(state): State<ControlState>) -> HttpResponse {
@@ -491,6 +976,22 @@ async fn submit_saga(
 ) -> HttpResponse {
     submit_transaction(&state, &headers, TransactionKind::Saga, request).await
 }
+
+macro_rules! submit_handler {
+    ($name:ident, $kind:expr) => {
+        async fn $name(
+            State(state): State<ControlState>,
+            headers: HeaderMap,
+            Json(request): Json<SubmitTransactionRequest>,
+        ) -> HttpResponse {
+            submit_transaction(&state, &headers, $kind, request).await
+        }
+    };
+}
+
+submit_handler!(submit_workflow, TransactionKind::Workflow);
+submit_handler!(submit_message, TransactionKind::Message);
+submit_handler!(submit_xa, TransactionKind::Xa);
 
 async fn submit_transaction(
     state: &ControlState,
@@ -541,7 +1042,17 @@ transition_handler!(confirm_tcc, confirm_tcc, "dtm.tcc.confirm");
 transition_handler!(cancel_tcc, cancel_tcc, "dtm.tcc.cancel");
 transition_handler!(start_saga, start_saga, "dtm.saga.start");
 transition_handler!(abort_saga, abort_saga, "dtm.saga.abort");
+transition_handler!(start_workflow, start_workflow, "dtm.workflow.start");
+transition_handler!(abort_workflow, abort_workflow, "dtm.workflow.abort");
+transition_handler!(prepare_message, prepare_message, "dtm.message.prepare");
+transition_handler!(dispatch_message, dispatch_message, "dtm.message.dispatch");
+transition_handler!(abort_message, abort_message, "dtm.message.abort");
+transition_handler!(prepare_xa, prepare_xa, "dtm.xa.prepare");
+transition_handler!(commit_xa, commit_xa, "dtm.xa.commit");
+transition_handler!(rollback_xa, rollback_xa, "dtm.xa.rollback");
 transition_handler!(recover_transaction, recover, "dtm.transaction.recover");
+transition_handler!(force_stop_transaction, force_stop, "dtm.transaction.force_stop");
+transition_handler!(reset_retry_transaction, reset_retry, "dtm.transaction.reset_retry");
 
 async fn get_transaction(
     State(state): State<ControlState>,
@@ -733,6 +1244,33 @@ fn build_transaction(
                     branch.payload,
                 )
             }
+            TransactionKind::Workflow => {
+                let compensate = branch
+                    .compensate
+                    .filter(|url| branch_url_policy.validate(url).is_ok())
+                    .ok_or("Workflow branches require a valid compensate URL")?;
+                Branch::workflow(
+                    branch.id,
+                    branch.action,
+                    compensate,
+                    branch.dependencies,
+                    branch.payload,
+                )
+            }
+            TransactionKind::Message => {
+                if !branch.dependencies.is_empty() {
+                    return Err("Message branches do not support dependencies");
+                }
+                Branch::message(branch.id, branch.action, branch.payload)
+            }
+            TransactionKind::Xa => {
+                let rollback = branch
+                    .cancel
+                    .or(branch.compensate)
+                    .filter(|url| branch_url_policy.validate(url).is_ok())
+                    .ok_or("XA branches require a valid rollback URL")?;
+                Branch::xa(branch.id, branch.action, rollback, branch.payload)
+            }
         };
         branches.push(branch);
     }
@@ -778,7 +1316,10 @@ fn parse_kind(value: &str) -> Result<TransactionKind, &'static str> {
     match value.to_ascii_lowercase().as_str() {
         "tcc" => Ok(TransactionKind::Tcc),
         "saga" => Ok(TransactionKind::Saga),
-        _ => Err("kind must be tcc or saga"),
+        "workflow" => Ok(TransactionKind::Workflow),
+        "message" | "msg" => Ok(TransactionKind::Message),
+        "xa" => Ok(TransactionKind::Xa),
+        _ => Err("kind must be tcc, saga, workflow, message, or xa"),
     }
 }
 
@@ -800,6 +1341,9 @@ const fn kind_name(kind: TransactionKind) -> &'static str {
     match kind {
         TransactionKind::Tcc => "tcc",
         TransactionKind::Saga => "saga",
+        TransactionKind::Workflow => "workflow",
+        TransactionKind::Message => "message",
+        TransactionKind::Xa => "xa",
     }
 }
 
@@ -1014,6 +1558,7 @@ mod tests {
                 confirm: Some("http://inventory/confirm".to_string()),
                 cancel: Some("http://inventory/cancel".to_string()),
                 payload: serde_json::json!({"sku": "A", "count": 1}),
+                dependencies: Vec::new(),
             }],
             timeout_millis: Some(30_000),
             metadata: BTreeMap::new(),
@@ -1045,6 +1590,7 @@ mod tests {
                 confirm: Some("http://169.254.169.254/confirm".to_string()),
                 cancel: Some("http://169.254.169.254/cancel".to_string()),
                 payload: serde_json::json!({}),
+                dependencies: Vec::new(),
             }],
             timeout_millis: None,
             metadata: BTreeMap::new(),

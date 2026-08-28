@@ -55,9 +55,14 @@ Authorization: Bearer <ROZE_DTM_CONTROL_TOKEN>
 - `POST /v1/saga`：提交 Saga 事务。
 - `POST /v1/saga/{gid}/start`：执行 Saga 正向分支。
 - `POST /v1/saga/{gid}/abort`：执行反向补偿。
+- `POST /v1/workflows`、`/v1/workflows/{gid}/start|abort`：提交、执行或补偿 Workflow。
+- `POST /v1/messages`、`/v1/messages/{gid}/prepare|dispatch|abort`：二阶段消息生命周期。
+- `POST /v1/xa`、`/v1/xa/{gid}/prepare|commit|rollback`：XA 协调生命周期。
 - `GET /v1/transactions`：过滤并分页查询事务。
 - `GET /v1/transactions/{gid}`：查询单个事务。
 - `POST /v1/transactions/{gid}/recover`：强制推进一个可安全重放的状态。
+- `POST /v1/transactions/{gid}/force-stop`：停止非终态事务的自动处理。
+- `POST /v1/transactions/{gid}/reset-retry`：立即重新调度失败或补偿中的分支。
 - `POST /v1/recover`：触发一次全局恢复扫描。
 - `GET /v1/stats`：按类型和状态统计事务。
 - `GET /healthz`、`GET /startupz`、`GET /readyz`：运行状态探针。

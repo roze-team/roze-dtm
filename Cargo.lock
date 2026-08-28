@@ -2166,6 +2166,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "reqwest 0.13.4",
+ "roze-transaction",
  "serde",
  "serde_json",
  "sqlx",
@@ -2458,6 +2459,20 @@ source = "git+https://github.com/roze-team/roze.git?rev=217274a134068f174cbe4a26
 dependencies = [
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "roze-transaction"
+version = "1.0.0"
+source = "git+https://github.com/roze-team/roze.git?rev=217274a134068f174cbe4a266a011bf719e15d0d#217274a134068f174cbe4a266a011bf719e15d0d"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "roze-context",
+ "roze-mq",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

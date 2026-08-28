@@ -11,11 +11,12 @@
 | 存储 | 已支持 | Memory、SQLite、PostgreSQL、MySQL |
 | 高可用恢复 | 已支持 | 持久化租约保证同一时刻只有一个恢复 worker 推进事务 |
 | 控制面 | 已支持 | Roze HTTP、数字响应信封、鉴权、健康检查、指标与审计事件 |
-| XA | 待实现 | 需要资源管理器能力探测、超时与启发式结果契约 |
-| 二阶段消息 | 待实现 | 优先复用 `roze-transaction` persistent outbox 与 `roze-mq` |
-| Workflow DSL | 待实现 | 作为 Saga 之上的应用拥有编排层，不侵入核心状态机 |
+| DTM HTTP/JSON-RPC 兼容 | 已支持核心 | 写入、查询、原子分支注册、force-stop 与 retry-reset；gRPC proto 已固化，服务端待补 |
+| XA | 部分支持 | 已有 Prepare/Commit/Rollback 与动态分支；资源管理器 SQL 助手和启发式结果待补 |
+| 二阶段消息 | 已支持核心 | Prepared/Dispatch/Abort，并复用 `roze-transaction` Outbox/Inbox 与 `roze-mq` |
+| Workflow DSL | 已支持核心 | 静态依赖图、恢复和逆序补偿；回调式动态 Workflow 待补 |
 | Redis 存储 | 待实现 | 需要原子脚本、租约 fencing 和真实故障测试 |
-| SDK | 待实现 | 先提供 Rust client，再根据稳定 HTTP 契约生成其他语言 SDK |
+| SDK | 部分支持 | 已提供 Rust HTTP client；其他语言 SDK 和 gRPC client 待补 |
 | Dashboard | 待实现 | 基于只读查询、统计和审计事件构建，不暴露密钥或分支载荷 |
 
 ## 实施顺序

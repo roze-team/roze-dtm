@@ -6,9 +6,11 @@ Roze 的独立分布式事务协调器，默认提供 TCC，并支持 Saga 工�
 
 - `src/lib.rs`：DTM 核心库，包含 TCC/Saga 状态机、内存、SQLite、PostgreSQL、MySQL 存储、HTTP 分支调用和恢复逻辑。
 - `service/`：独立控制面服务。
+- `proto/dtmgimp.proto`：与 dtm-labs/dtm 保持字段号兼容的 gRPC 协议合同；服务端适配器尚未启用。
 - `service/config.yaml`：开发环境示例配置，也是服务的默认配置。
 - `docs/dtm.md`：API、部署与安全契约。
 - `docs/roadmap.md`：参考 dtm-labs/dtm 的能力矩阵与 Roze 实施顺序。
+- `docs/dtm-compatibility.md`：dtm-labs/dtm HTTP 兼容端点、调用顺序和差异。
 
 ## 验证
 
@@ -56,6 +58,12 @@ docker compose up --build
 - `mysql`：生产后端，支持多实例恢复租约。
 
 所有关系型后端会在启动时幂等创建事务、分支屏障和恢复租约表。连接由 Roze `roze-sqlx` 管理，可通过 `max_connections` 设置连接池上限。
+
+动态分支注册由存储层原子执行：内存后端使用写锁，PostgreSQL/MySQL 使用行锁，SQLite 使用带冲突重试的比较更新，避免多实例并发注册互相覆盖。
+
+## Rust 客户端
+
+核心 crate 提供 `roze_dtm::client::DtmHttpClient`，支持提交五类事务、调用状态转换、查询事务和获取兼容 GID。客户端拒绝非 HTTP(S) 服务地址且不跟随重定向；生产环境应配置 Bearer token。
 
 ## 上游同步
 
