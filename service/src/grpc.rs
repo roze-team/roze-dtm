@@ -8,9 +8,7 @@ use roze_dtm::pb::dtmgimp::{
     DtmTopicRequest, DtmTransaction,
 };
 
-use crate::{
-    CompatBranchRequest, CompatOperation, CompatTransactionRequest, ControlState,
-};
+use crate::{CompatBranchRequest, CompatOperation, CompatTransactionRequest, ControlState};
 
 #[derive(Clone)]
 pub(crate) struct DtmGrpcService {
@@ -69,9 +67,7 @@ impl Dtm for DtmGrpcService {
                 serde_json::to_string(&payload_value(busi_payload.clone()))
                     .map_err(|_| bad_request("invalid branch payload", &context))?,
             ),
-            op: data
-                .remove("op")
-                .or_else(|| (!op.is_empty()).then_some(op)),
+            op: data.remove("op").or_else(|| (!op.is_empty()).then_some(op)),
             status: data.remove("status"),
             confirm: data.remove("confirm"),
             cancel: data.remove("cancel"),
@@ -155,10 +151,7 @@ impl Dtm for DtmGrpcService {
         )
     }
 
-    async fn subscribe(
-        &self,
-        request: Request<DtmTopicRequest>,
-    ) -> Result<Response<()>, Status> {
+    async fn subscribe(&self, request: Request<DtmTopicRequest>) -> Result<Response<()>, Status> {
         let context = authorize(&self.state, &request)?;
         let input = request.into_inner();
         self.state
@@ -189,10 +182,7 @@ impl Dtm for DtmGrpcService {
         success((), &context)
     }
 
-    async fn unsubscribe(
-        &self,
-        request: Request<DtmTopicRequest>,
-    ) -> Result<Response<()>, Status> {
+    async fn unsubscribe(&self, request: Request<DtmTopicRequest>) -> Result<Response<()>, Status> {
         let context = authorize(&self.state, &request)?;
         let input = request.into_inner();
         self.state
@@ -225,21 +215,16 @@ impl Dtm for DtmGrpcService {
     ) -> Result<Response<()>, Status> {
         let context = authorize(&self.state, &request)?;
         let topic = request.into_inner().topic;
-        let deleted = self
-            .state
-            .dtm
-            .delete_topic(&topic)
-            .await
-            .map_err(|_| {
-                crate::audit_resource_operation(
-                    &self.state.audit_history,
-                    "dtm.compat.grpc.delete_topic",
-                    "topic",
-                    &topic,
-                    "failed",
-                );
-                operation_failed("topic deletion failed", &context)
-            })?;
+        let deleted = self.state.dtm.delete_topic(&topic).await.map_err(|_| {
+            crate::audit_resource_operation(
+                &self.state.audit_history,
+                "dtm.compat.grpc.delete_topic",
+                "topic",
+                &topic,
+                "failed",
+            );
+            operation_failed("topic deletion failed", &context)
+        })?;
         if !deleted {
             crate::audit_resource_operation(
                 &self.state.audit_history,
@@ -344,9 +329,9 @@ fn authorize<T>(
         .get("authorization")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    if provided.is_some_and(|provided| {
-        crate::constant_time_eq(provided.as_bytes(), expected.as_bytes())
-    }) {
+    if provided
+        .is_some_and(|provided| crate::constant_time_eq(provided.as_bytes(), expected.as_bytes()))
+    {
         Ok(context)
     } else {
         Err(roze_rpc::rpc::status_from_error(
@@ -365,10 +350,7 @@ fn bad_request(message: &str, context: &roze_context::Context) -> Status {
 }
 
 fn operation_failed(message: &str, context: &roze_context::Context) -> Status {
-    roze_rpc::rpc::status_from_error(
-        RozeError::FailedPrecondition(message.to_owned()),
-        context,
-    )
+    roze_rpc::rpc::status_from_error(RozeError::FailedPrecondition(message.to_owned()), context)
 }
 
 #[cfg(test)]
@@ -399,8 +381,8 @@ mod tests {
             steps: r#"[{"action":"http://inventory/action","compensate":"http://inventory/compensate"}]"#.to_owned(),
             ..Default::default()
         };
-        let converted = compat_request(request, &roze_context::Context::background())
-            .expect("convert request");
+        let converted =
+            compat_request(request, &roze_context::Context::background()).expect("convert request");
         assert_eq!(converted.gid, "gid-grpc");
         assert_eq!(converted.timeout_to_fail, Some(30));
         assert_eq!(converted.steps.len(), 1);

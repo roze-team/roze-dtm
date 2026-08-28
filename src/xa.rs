@@ -63,10 +63,8 @@ CREATE TABLE IF NOT EXISTS roze_xa_decisions (
 )
 "#;
 
-pub type MySqlXaWork<'a, T> =
-    Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>;
-pub type PostgresXaWork<'a, T> =
-    Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>;
+pub type MySqlXaWork<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>;
+pub type PostgresXaWork<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -204,7 +202,11 @@ impl XaBranchDescriptor {
         validate_xid_part("gid", &self.gid)?;
         validate_xid_part("branch id", &self.branch_id)?;
         anyhow::ensure!(
-            self.gid.len().saturating_add(self.branch_id.len()).saturating_add(1) <= 128,
+            self.gid
+                .len()
+                .saturating_add(self.branch_id.len())
+                .saturating_add(1)
+                <= 128,
             "XA resource id exceeds 128 bytes"
         );
         let url = reqwest::Url::parse(&self.phase2_url).context("invalid XA phase-2 URL")?;
@@ -264,33 +266,30 @@ impl MySqlXaResourceManager {
     ) -> anyhow::Result<XaLocalOutcome<T>>
     where
         T: Send,
-        F: for<'connection> FnOnce(
-                &'connection mut MySqlConnection,
-            ) -> MySqlXaWork<'connection, T>
+        F: for<'connection> FnOnce(&'connection mut MySqlConnection) -> MySqlXaWork<'connection, T>
             + Send,
     {
         branch.validate()?;
         let xid = branch.resource_id();
         anyhow::ensure!(xid.len() <= 64, "MySQL XA resource id exceeds 64 bytes");
         let mut connection = self.pool.acquire().await?;
-        execute_mysql(&mut connection, &mysql_xa_sql("start", &xid)).await?;
+        execute_mysql(&mut connection, audited_mysql_xa_sql("start", &xid)).await?;
 
-        let inserted = match sqlx::query(
-            "INSERT IGNORE INTO roze_xa_barriers (gid, branch_id) VALUES (?, ?)",
-        )
-        .bind(&branch.gid)
-        .bind(&branch.branch_id)
-        .execute(&mut *connection)
-        .await
-        {
-            Ok(result) => result.rows_affected(),
-            Err(error) => {
-                cleanup_mysql(connection, &xid)
-                    .await
-                    .context("failed to clean up XA branch after barrier error")?;
-                return Err(error).context("failed to insert XA branch barrier");
-            }
-        };
+        let inserted =
+            match sqlx::query("INSERT IGNORE INTO roze_xa_barriers (gid, branch_id) VALUES (?, ?)")
+                .bind(&branch.gid)
+                .bind(&branch.branch_id)
+                .execute(&mut *connection)
+                .await
+            {
+                Ok(result) => result.rows_affected(),
+                Err(error) => {
+                    cleanup_mysql(connection, &xid)
+                        .await
+                        .context("failed to clean up XA branch after barrier error")?;
+                    return Err(error).context("failed to insert XA branch barrier");
+                }
+            };
         if inserted == 0 {
             cleanup_mysql(connection, &xid).await?;
             return Ok(XaLocalOutcome::Duplicate);
@@ -314,13 +313,16 @@ impl MySqlXaResourceManager {
                 .context("failed to roll back XA branch after registration error")?;
             return Err(error.context("failed to register XA branch"));
         }
-        if let Err(error) = execute_mysql(&mut connection, &mysql_xa_sql("end", &xid)).await {
+        if let Err(error) = execute_mysql(&mut connection, audited_mysql_xa_sql("end", &xid)).await
+        {
             cleanup_mysql(connection, &xid)
                 .await
                 .context("failed to roll back XA branch after XA END error")?;
             return Err(error.context("failed to end XA branch"));
         }
-        if let Err(error) = execute_mysql(&mut connection, &mysql_xa_sql("prepare", &xid)).await {
+        if let Err(error) =
+            execute_mysql(&mut connection, audited_mysql_xa_sql("prepare", &xid)).await
+        {
             cleanup_mysql(connection, &xid)
                 .await
                 .context("failed to roll back XA branch after prepare error")?;
@@ -343,7 +345,7 @@ impl MySqlXaResourceManager {
             XaPhase2::Commit => "commit",
             XaPhase2::Rollback => "rollback",
         };
-        let result = sqlx::query(&mysql_xa_sql(command, &branch.resource_id()))
+        let result = sqlx::query(audited_mysql_xa_sql(command, &branch.resource_id()))
             .execute(&self.pool)
             .await;
         match result {
@@ -380,12 +382,9 @@ impl MySqlXaResourceManager {
         let outcome = match self.resolve(branch, request.decision).await {
             Ok(outcome) => outcome,
             Err(error) => {
-                self.finish_heuristic_decision(
-                    &request.decision_id,
-                    XaHeuristicStatus::Failed,
-                )
-                .await
-                .context("failed to persist failed XA heuristic outcome")?;
+                self.finish_heuristic_decision(&request.decision_id, XaHeuristicStatus::Failed)
+                    .await
+                    .context("failed to persist failed XA heuristic outcome")?;
                 return Err(error.context("XA heuristic phase-2 failed"));
             }
         };
@@ -507,9 +506,7 @@ impl PostgresXaResourceManager {
     ) -> anyhow::Result<XaLocalOutcome<T>>
     where
         T: Send,
-        F: for<'connection> FnOnce(
-                &'connection mut PgConnection,
-            ) -> PostgresXaWork<'connection, T>
+        F: for<'connection> FnOnce(&'connection mut PgConnection) -> PostgresXaWork<'connection, T>
             + Send,
     {
         branch.validate()?;
@@ -555,11 +552,8 @@ impl PostgresXaResourceManager {
                 .context("failed to roll back XA branch after registration error")?;
             return Err(error.context("failed to register XA branch"));
         }
-        if let Err(error) = execute_postgres(
-            &mut connection,
-            &postgres_xa_sql("prepare", &xid),
-        )
-        .await
+        if let Err(error) =
+            execute_postgres(&mut connection, audited_postgres_xa_sql("prepare", &xid)).await
         {
             cleanup_postgres(connection)
                 .await
@@ -579,14 +573,12 @@ impl PostgresXaResourceManager {
             XaPhase2::Commit => "commit",
             XaPhase2::Rollback => "rollback",
         };
-        let result = sqlx::query(&postgres_xa_sql(command, &branch.resource_id()))
+        let result = sqlx::query(audited_postgres_xa_sql(command, &branch.resource_id()))
             .execute(&self.pool)
             .await;
         match result {
             Ok(_) => Ok(XaPhase2Outcome::Applied),
-            Err(error) if postgres_already_resolved(&error) => {
-                Ok(XaPhase2Outcome::AlreadyResolved)
-            }
+            Err(error) if postgres_already_resolved(&error) => Ok(XaPhase2Outcome::AlreadyResolved),
             Err(error) => Err(error.into()),
         }
     }
@@ -616,12 +608,9 @@ impl PostgresXaResourceManager {
         let outcome = match self.resolve(branch, request.decision).await {
             Ok(outcome) => outcome,
             Err(error) => {
-                self.finish_heuristic_decision(
-                    &request.decision_id,
-                    XaHeuristicStatus::Failed,
-                )
-                .await
-                .context("failed to persist failed XA heuristic outcome")?;
+                self.finish_heuristic_decision(&request.decision_id, XaHeuristicStatus::Failed)
+                    .await
+                    .context("failed to persist failed XA heuristic outcome")?;
                 return Err(error.context("XA heuristic phase-2 failed"));
             }
         };
@@ -777,32 +766,32 @@ fn ensure_heuristic_request_matches(
 }
 
 fn mysql_heuristic_record(row: MySqlRow) -> anyhow::Result<XaHeuristicRecord> {
-    heuristic_record_from_values(
-        row.try_get("decision_id")?,
-        row.try_get("gid")?,
-        row.try_get("branch_id")?,
-        row.try_get("decision")?,
-        row.try_get("reason")?,
-        row.try_get("status")?,
-        row.try_get::<i64, _>("requested_at_millis")?,
-        row.try_get::<Option<i64>, _>("finished_at_millis")?,
-    )
+    heuristic_record_from_values(RawXaHeuristicRecord {
+        decision_id: row.try_get("decision_id")?,
+        gid: row.try_get("gid")?,
+        branch_id: row.try_get("branch_id")?,
+        decision: row.try_get("decision")?,
+        reason: row.try_get("reason")?,
+        status: row.try_get("status")?,
+        requested_at_millis: row.try_get::<i64, _>("requested_at_millis")?,
+        finished_at_millis: row.try_get::<Option<i64>, _>("finished_at_millis")?,
+    })
 }
 
 fn postgres_heuristic_record(row: PgRow) -> anyhow::Result<XaHeuristicRecord> {
-    heuristic_record_from_values(
-        row.try_get("decision_id")?,
-        row.try_get("gid")?,
-        row.try_get("branch_id")?,
-        row.try_get("decision")?,
-        row.try_get("reason")?,
-        row.try_get("status")?,
-        row.try_get::<i64, _>("requested_at_millis")?,
-        row.try_get::<Option<i64>, _>("finished_at_millis")?,
-    )
+    heuristic_record_from_values(RawXaHeuristicRecord {
+        decision_id: row.try_get("decision_id")?,
+        gid: row.try_get("gid")?,
+        branch_id: row.try_get("branch_id")?,
+        decision: row.try_get("decision")?,
+        reason: row.try_get("reason")?,
+        status: row.try_get("status")?,
+        requested_at_millis: row.try_get::<i64, _>("requested_at_millis")?,
+        finished_at_millis: row.try_get::<Option<i64>, _>("finished_at_millis")?,
+    })
 }
 
-fn heuristic_record_from_values(
+struct RawXaHeuristicRecord {
     decision_id: String,
     gid: String,
     branch_id: String,
@@ -811,17 +800,20 @@ fn heuristic_record_from_values(
     status: String,
     requested_at_millis: i64,
     finished_at_millis: Option<i64>,
-) -> anyhow::Result<XaHeuristicRecord> {
+}
+
+fn heuristic_record_from_values(raw: RawXaHeuristicRecord) -> anyhow::Result<XaHeuristicRecord> {
     Ok(XaHeuristicRecord {
-        decision_id,
-        gid,
-        branch_id,
-        decision: parse_xa_phase(&decision)?,
-        reason,
-        status: parse_heuristic_status(&status)?,
-        requested_at_millis: u64::try_from(requested_at_millis)
+        decision_id: raw.decision_id,
+        gid: raw.gid,
+        branch_id: raw.branch_id,
+        decision: parse_xa_phase(&raw.decision)?,
+        reason: raw.reason,
+        status: parse_heuristic_status(&raw.status)?,
+        requested_at_millis: u64::try_from(raw.requested_at_millis)
             .context("invalid XA heuristic request timestamp")?,
-        finished_at_millis: finished_at_millis
+        finished_at_millis: raw
+            .finished_at_millis
             .map(u64::try_from)
             .transpose()
             .context("invalid XA heuristic completion timestamp")?,
@@ -834,7 +826,10 @@ fn build_reconciliation_report(
 ) -> anyhow::Result<XaReconciliationReport> {
     prepared_resource_ids.sort();
     prepared_resource_ids.dedup();
-    let prepared = prepared_resource_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let prepared = prepared_resource_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let pending_decisions = decisions
         .into_iter()
         .filter(|record| {
@@ -848,14 +843,8 @@ fn build_reconciliation_report(
         .iter()
         .map(XaHeuristicRecord::resource_id)
         .collect::<BTreeSet<_>>();
-    let prepared_without_decision = prepared
-        .difference(&decided_resources)
-        .cloned()
-        .collect();
-    let decisions_without_prepared = decided_resources
-        .difference(&prepared)
-        .cloned()
-        .collect();
+    let prepared_without_decision = prepared.difference(&decided_resources).cloned().collect();
+    let decisions_without_prepared = decided_resources.difference(&prepared).cloned().collect();
     Ok(XaReconciliationReport {
         prepared_resource_ids,
         pending_decisions,
@@ -865,7 +854,12 @@ fn build_reconciliation_report(
 }
 
 fn mysql_xa_sql(command: &str, xid: &str) -> String {
-    format!("XA {command} '{xid}'")
+    match command {
+        "start" | "end" | "prepare" | "commit" | "rollback" => {
+            format!("XA {command} '{xid}'")
+        }
+        _ => unreachable!("validated MySQL XA command"),
+    }
 }
 
 fn postgres_xa_sql(command: &str, xid: &str) -> String {
@@ -877,23 +871,30 @@ fn postgres_xa_sql(command: &str, xid: &str) -> String {
     }
 }
 
-async fn execute_mysql(connection: &mut MySqlConnection, statement: &str) -> anyhow::Result<()> {
+fn audited_mysql_xa_sql(command: &str, xid: &str) -> sqlx::AssertSqlSafe<String> {
+    debug_assert!(validate_xid_part("resource id", xid).is_ok());
+    sqlx::AssertSqlSafe(mysql_xa_sql(command, xid))
+}
+
+fn audited_postgres_xa_sql(command: &str, xid: &str) -> sqlx::AssertSqlSafe<String> {
+    debug_assert!(validate_xid_part("resource id", xid).is_ok());
+    sqlx::AssertSqlSafe(postgres_xa_sql(command, xid))
+}
+
+async fn execute_mysql(
+    connection: &mut MySqlConnection,
+    statement: impl sqlx::SqlSafeStr,
+) -> anyhow::Result<()> {
     sqlx::query(statement).execute(connection).await?;
     Ok(())
 }
 
-async fn rollback_mysql_active(
-    connection: &mut MySqlConnection,
-    xid: &str,
-) -> anyhow::Result<()> {
-    let _ = execute_mysql(connection, &mysql_xa_sql("end", xid)).await;
-    execute_mysql(connection, &mysql_xa_sql("rollback", xid)).await
+async fn rollback_mysql_active(connection: &mut MySqlConnection, xid: &str) -> anyhow::Result<()> {
+    let _ = execute_mysql(connection, audited_mysql_xa_sql("end", xid)).await;
+    execute_mysql(connection, audited_mysql_xa_sql("rollback", xid)).await
 }
 
-async fn cleanup_mysql(
-    mut connection: PoolConnection<MySql>,
-    xid: &str,
-) -> anyhow::Result<()> {
+async fn cleanup_mysql(mut connection: PoolConnection<MySql>, xid: &str) -> anyhow::Result<()> {
     if let Err(error) = rollback_mysql_active(&mut connection, xid).await {
         let _ = connection.close().await;
         return Err(error);
@@ -903,7 +904,7 @@ async fn cleanup_mysql(
 
 async fn execute_postgres(
     connection: &mut PgConnection,
-    statement: &str,
+    statement: impl sqlx::SqlSafeStr,
 ) -> anyhow::Result<()> {
     sqlx::query(statement).execute(connection).await?;
     Ok(())
@@ -938,12 +939,9 @@ mod tests {
 
     #[test]
     fn descriptor_builds_injection_safe_resource_id() {
-        let branch = XaBranchDescriptor::new(
-            "order-2026",
-            "01",
-            "https://business.example.com/xa/phase2",
-        )
-        .expect("valid XA branch");
+        let branch =
+            XaBranchDescriptor::new("order-2026", "01", "https://business.example.com/xa/phase2")
+                .expect("valid XA branch");
         assert_eq!(branch.resource_id(), "order-2026-01");
         assert!(XaBranchDescriptor::new(
             "order'; DROP TABLE accounts; --",

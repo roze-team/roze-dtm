@@ -37,12 +37,7 @@ impl DtmGrpcClient {
 
     pub async fn new_gid(&mut self, context: &Context) -> anyhow::Result<String> {
         let request = self.request(context, ())?;
-        Ok(self
-            .inner
-            .new_gid(request)
-            .await?
-            .into_inner()
-            .gid)
+        Ok(self.inner.new_gid(request).await?.into_inner().gid)
     }
 
     pub async fn submit(&mut self, context: &Context, input: DtmRequest) -> anyhow::Result<()> {
@@ -138,11 +133,7 @@ impl DtmGrpcClient {
         input: DtmRequest,
     ) -> anyhow::Result<DtmProgressesReply> {
         let request = self.request(context, input)?;
-        Ok(self
-            .inner
-            .prepare_workflow(request)
-            .await?
-            .into_inner())
+        Ok(self.inner.prepare_workflow(request).await?.into_inner())
     }
 
     pub async fn query_callback_workflow(
@@ -177,7 +168,10 @@ impl DtmGrpcClient {
             !workflow_name.is_empty() && workflow_name.len() <= 128,
             "callback workflow name must contain 1 to 128 bytes"
         );
-        anyhow::ensure!(data.len() <= 2 * 1024 * 1024, "callback workflow data exceeds 2 MiB");
+        anyhow::ensure!(
+            data.len() <= 2 * 1024 * 1024,
+            "callback workflow data exceeds 2 MiB"
+        );
         let custom_data = serde_json::json!({
             "name": workflow_name,
             "data": BASE64_STANDARD.encode(data),
@@ -225,10 +219,9 @@ impl DtmGrpcClient {
             None,
         );
         if let Some(token) = &self.bearer_token {
-            request.metadata_mut().insert(
-                "authorization",
-                format!("Bearer {token}").parse()?,
-            );
+            request
+                .metadata_mut()
+                .insert("authorization", format!("Bearer {token}").parse()?);
         }
         Ok(request)
     }

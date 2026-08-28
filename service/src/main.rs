@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -13,11 +14,12 @@ use anyhow::Context as _;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use roze_dtm::{
-    validate_redis_namespace, validate_saga_dependencies, AlertWebhookConfig, Branch, BranchKind,
-    BranchStatus, BranchUrlPolicy, Dtm, DtmOptions, HttpBranchInvoker, InMemoryTransactionStore,
-    KvEntry, MySqlTransactionStore, PostgresTransactionStore, RedisTransactionStore,
-    SqliteTransactionStore, Transaction, TransactionKind, TransactionOptions, TransactionStatus,
-    TransactionStore, WorkflowProgress, WorkflowProgressStatus,
+    validate_redis_namespace, validate_transaction_dependencies, AlertWebhookConfig, Branch,
+    BranchKind, BranchStatus, BranchUrlPolicy, Dtm, DtmOptions, HttpBranchInvoker,
+    InMemoryTransactionStore, KvEntry, MySqlTransactionStore, PostgresTransactionStore,
+    RedisTransactionStore, SqliteTransactionStore, Transaction, TransactionKind,
+    TransactionOptions, TransactionStatus, TransactionStore, WorkflowProgress,
+    WorkflowProgressStatus,
 };
 use roze_http::{
     rest::{self, HttpResponse, RestServer, RestService},
@@ -848,10 +850,9 @@ async fn main() -> anyhow::Result<()> {
             }
         });
         health.mark_ready();
-        let (rpc_health, grpc_health_service) =
-            roze_rpc::health::RpcHealthReporter::new_for::<
-                roze_dtm::pb::dtmgimp::dtm_server::DtmServer<grpc::DtmGrpcService>,
-            >(health);
+        let (rpc_health, grpc_health_service) = roze_rpc::health::RpcHealthReporter::new_for::<
+            roze_dtm::pb::dtmgimp::dtm_server::DtmServer<grpc::DtmGrpcService>,
+        >(health);
         rpc_health.refresh().await;
         group.add_fn("roze-dtm-grpc", move |shutdown| {
             let grpc_health_service = grpc_health_service.clone();
@@ -864,9 +865,9 @@ async fn main() -> anyhow::Result<()> {
                     "DTM gRPC server listening"
                 );
                 let routes = roze_grpc::GrpcRouter::new(grpc_health_service).add_service(
-                    roze_dtm::pb::dtmgimp::dtm_server::DtmServer::new(
-                        grpc::DtmGrpcService::new(rpc_state),
-                    ),
+                    roze_dtm::pb::dtmgimp::dtm_server::DtmServer::new(grpc::DtmGrpcService::new(
+                        rpc_state,
+                    )),
                 );
                 roze_rpc::rpc::RpcServer::new(rpc_addr)
                     .builder()
@@ -1013,8 +1014,14 @@ fn control_router(state: ControlState) -> Router {
         .route("/v1/transactions", get(list_transactions))
         .route("/v1/transactions/{gid}", get(get_transaction))
         .route("/v1/transactions/{gid}/recover", post(recover_transaction))
-        .route("/v1/transactions/{gid}/force-stop", post(force_stop_transaction))
-        .route("/v1/transactions/{gid}/reset-retry", post(reset_retry_transaction))
+        .route(
+            "/v1/transactions/{gid}/force-stop",
+            post(force_stop_transaction),
+        )
+        .route(
+            "/v1/transactions/{gid}/reset-retry",
+            post(reset_retry_transaction),
+        )
         .route("/v1/recover", post(recover_all))
         .route("/v1/stats", get(stats))
         .route("/v1/dashboard", get(dashboard_snapshot))
@@ -1026,7 +1033,10 @@ fn control_router(state: ControlState) -> Router {
         .route("/api/dtmsvr/submit", post(compat_submit))
         .route("/api/dtmsvr/abort", post(compat_abort))
         .route("/api/dtmsvr/registerBranch", post(compat_register_branch))
-        .route("/api/dtmsvr/registerTccBranch", post(compat_register_branch))
+        .route(
+            "/api/dtmsvr/registerTccBranch",
+            post(compat_register_branch),
+        )
         .route("/api/dtmsvr/registerXaBranch", post(compat_register_branch))
         .route("/api/dtmsvr/prepareWorkflow", post(compat_prepare_workflow))
         .route("/api/dtmsvr/forceStop", post(compat_force_stop))
@@ -1034,7 +1044,10 @@ fn control_router(state: ControlState) -> Router {
         .route("/api/dtmsvr/resetCronTime", get(compat_reset_retry_batch))
         .route("/api/dtmsvr/subscribe", get(compat_subscribe))
         .route("/api/dtmsvr/unsubscribe", get(compat_unsubscribe))
-        .route("/api/dtmsvr/topic/{topic_name}", delete(compat_delete_topic))
+        .route(
+            "/api/dtmsvr/topic/{topic_name}",
+            delete(compat_delete_topic),
+        )
         .route("/api/dtmsvr/scanKV", get(compat_scan_kv))
         .route("/api/dtmsvr/queryKV", get(compat_query_kv))
         .route("/api/metrics", get(metrics))
@@ -1067,7 +1080,9 @@ async fn metrics() -> String {
     if !output.is_empty() && !output.ends_with('\n') {
         output.push('\n');
     }
-    output.push_str("# TYPE roze_dtm_metrics_registry_available gauge\nroze_dtm_metrics_registry_available 1\n");
+    output.push_str(
+        "# TYPE roze_dtm_metrics_registry_available gauge\nroze_dtm_metrics_registry_available 1\n",
+    );
     output.push_str(&DTM_METRICS.render());
     output
 }
@@ -1189,20 +1204,14 @@ fn build_compat_all_response(
         .into_iter()
         .filter(|tx| {
             query.gid.as_deref().is_none_or(|gid| tx.gid == gid)
-                && query
-                    .trans_type
-                    .as_deref()
-                    .is_none_or(|kind| {
-                        compat_kind_name(tx.kind) == kind
-                            || tx.kind == TransactionKind::Message && kind == "message"
-                    })
-                && query
-                    .status
-                    .as_deref()
-                    .is_none_or(|status| {
-                        compat_status_name(tx.status) == status
-                            || tx.status == TransactionStatus::Succeeded && status == "succeeded"
-                    })
+                && query.trans_type.as_deref().is_none_or(|kind| {
+                    compat_kind_name(tx.kind) == kind
+                        || tx.kind == TransactionKind::Message && kind == "message"
+                })
+                && query.status.as_deref().is_none_or(|status| {
+                    compat_status_name(tx.status) == status
+                        || tx.status == TransactionStatus::Succeeded && status == "succeeded"
+                })
                 && query
                     .create_time_start
                     .is_none_or(|start| tx.created_at_millis >= start)
@@ -1254,8 +1263,14 @@ fn compat_global_transaction(transaction: &Transaction) -> CompatGlobalTransacti
         .iter()
         .filter_map(|branch| branch.next_retry_millis)
         .min();
-    let retry_interval = transaction.options.retry_interval_millis.map(millis_to_seconds);
-    let request_timeout = transaction.options.request_timeout_millis.map(millis_to_seconds);
+    let retry_interval = transaction
+        .options
+        .retry_interval_millis
+        .map(millis_to_seconds);
+    let request_timeout = transaction
+        .options
+        .request_timeout_millis
+        .map(millis_to_seconds);
     let timeout_to_fail = transaction.timeout_millis.map(millis_to_seconds);
     let branch_headers = transaction
         .metadata
@@ -1416,16 +1431,36 @@ fn compat_branch_operations(
 ) -> Vec<(&Branch, &'static str, &str)> {
     match kind {
         TransactionKind::Saga => vec![
-            (branch, "compensate", branch.compensate.as_deref().unwrap_or_default()),
+            (
+                branch,
+                "compensate",
+                branch.compensate.as_deref().unwrap_or_default(),
+            ),
             (branch, "action", branch.action.as_str()),
         ],
         TransactionKind::Tcc => vec![
-            (branch, "cancel", branch.cancel.as_deref().unwrap_or_default()),
-            (branch, "confirm", branch.confirm.as_deref().unwrap_or_default()),
+            (
+                branch,
+                "cancel",
+                branch.cancel.as_deref().unwrap_or_default(),
+            ),
+            (
+                branch,
+                "confirm",
+                branch.confirm.as_deref().unwrap_or_default(),
+            ),
         ],
         TransactionKind::Xa => vec![
-            (branch, "rollback", branch.cancel.as_deref().unwrap_or_default()),
-            (branch, "commit", branch.confirm.as_deref().unwrap_or_default()),
+            (
+                branch,
+                "rollback",
+                branch.cancel.as_deref().unwrap_or_default(),
+            ),
+            (
+                branch,
+                "commit",
+                branch.confirm.as_deref().unwrap_or_default(),
+            ),
         ],
         TransactionKind::Message => vec![(branch, "action", branch.action.as_str())],
         TransactionKind::Workflow => Vec::new(),
@@ -1470,8 +1505,7 @@ fn compat_rfc3339(millis: u64) -> String {
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let day_of_era = z - era * 146_097;
     let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096)
-            / 365;
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
     let mut year = year_of_era + era * 400;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let month_prime = (5 * day_of_year + 2) / 153;
@@ -1977,14 +2011,21 @@ async fn compat_apply(
             state.branch_url_policy.validate_callback(&callback.url)?;
         }
         if let Some(reason) = request.rollback_reason {
-            transaction.metadata.insert("rollback_reason".to_string(), reason);
+            transaction
+                .metadata
+                .insert("rollback_reason".to_string(), reason);
         }
         state.dtm.submit(transaction).await?;
     }
-    if let Some((status, rollback_reason, result)) = callback_completion {
+    if let Some(completion) = callback_completion {
         return state
             .dtm
-            .finish_callback_workflow(&gid, status, rollback_reason, result)
+            .finish_callback_workflow(
+                &gid,
+                completion.status,
+                completion.rollback_reason,
+                completion.result,
+            )
             .await;
     }
     if !wait_result {
@@ -2001,12 +2042,18 @@ async fn compat_apply(
         (TransactionKind::Xa, CompatOperation::Prepare) => state.dtm.prepare_xa(&gid).await,
         (TransactionKind::Xa, CompatOperation::Submit) => state.dtm.commit_xa(&gid).await,
         (TransactionKind::Xa, CompatOperation::Abort) => state.dtm.rollback_xa(&gid).await,
-        (TransactionKind::Message, CompatOperation::Prepare) => state.dtm.prepare_message(&gid).await,
-        (TransactionKind::Message, CompatOperation::Submit) => state.dtm.dispatch_message(&gid).await,
+        (TransactionKind::Message, CompatOperation::Prepare) => {
+            state.dtm.prepare_message(&gid).await
+        }
+        (TransactionKind::Message, CompatOperation::Submit) => {
+            state.dtm.dispatch_message(&gid).await
+        }
         (TransactionKind::Message, CompatOperation::Abort) => state.dtm.abort_message(&gid).await,
         (TransactionKind::Saga, CompatOperation::Submit) => state.dtm.start_saga(&gid).await,
         (TransactionKind::Saga, CompatOperation::Abort) => state.dtm.abort_saga(&gid).await,
-        (TransactionKind::Workflow, CompatOperation::Submit) => state.dtm.start_workflow(&gid).await,
+        (TransactionKind::Workflow, CompatOperation::Submit) => {
+            state.dtm.start_workflow(&gid).await
+        }
         (TransactionKind::Workflow, CompatOperation::Abort) => state.dtm.abort_workflow(&gid).await,
         (TransactionKind::Workflow, CompatOperation::Prepare) => {
             state.dtm.prepare_workflow(&gid).await
@@ -2020,11 +2067,17 @@ async fn compat_apply(
     }
 }
 
+struct CallbackWorkflowCompletion {
+    status: TransactionStatus,
+    rollback_reason: Option<String>,
+    result: Option<String>,
+}
+
 fn callback_workflow_completion(
     kind: TransactionKind,
     operation: CompatOperation,
     request: &CompatTransactionRequest,
-) -> anyhow::Result<Option<(TransactionStatus, Option<String>, Option<String>)>> {
+) -> anyhow::Result<Option<CallbackWorkflowCompletion>> {
     if kind != TransactionKind::Workflow || !matches!(operation, CompatOperation::Submit) {
         return Ok(None);
     }
@@ -2036,18 +2089,22 @@ fn callback_workflow_completion(
         "failed" => TransactionStatus::Failed,
         _ => anyhow::bail!("callback workflow status must be succeed or failed"),
     };
-    Ok(Some((
+    Ok(Some(CallbackWorkflowCompletion {
         status,
-        request.req_extra.get("rollback_reason").cloned(),
-        request.req_extra.get("result").cloned(),
-    )))
+        rollback_reason: request.req_extra.get("rollback_reason").cloned(),
+        result: request.req_extra.get("result").cloned(),
+    }))
 }
 
 fn preserve_compat_metadata(
     transaction: &mut Transaction,
     request: &CompatTransactionRequest,
 ) -> anyhow::Result<()> {
-    if let Some(value) = request.custom_data.as_deref().filter(|value| !value.is_empty()) {
+    if let Some(value) = request
+        .custom_data
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
         transaction
             .metadata
             .insert("dtm.custom_data".to_owned(), value.to_owned());
@@ -2075,7 +2132,9 @@ fn preserve_compat_metadata(
         ("dtm.retry_limit", request.retry_limit),
     ] {
         if let Some(value) = value {
-            transaction.metadata.insert(key.to_owned(), value.to_string());
+            transaction
+                .metadata
+                .insert(key.to_owned(), value.to_string());
         }
     }
     if !request.branch_headers.is_empty() {
@@ -2157,7 +2216,9 @@ fn compat_registration_from_request(
             .unwrap_or_default();
         let progress = WorkflowProgress {
             branch_id: request.branch_id,
-            operation: request.op.context("workflow progress operation is required")?,
+            operation: request
+                .op
+                .context("workflow progress operation is required")?,
             status,
             data,
         };
@@ -2187,7 +2248,7 @@ fn compat_registration_from_request(
             if state.branch_url_policy.validate(&url).is_err() {
                 anyhow::bail!("branch URL is not allowed");
             }
-            Branch::xa(request.branch_id, &url, url, payload)
+            Branch::xa(request.branch_id, url.clone(), url, payload)
         }
         _ => anyhow::bail!("dynamic registration supports tcc and xa"),
     };
@@ -2203,10 +2264,7 @@ async fn json_rpc(
         Ok(value) => value,
         Err(_) => return json_rpc_error(serde_json::Value::Null, -32700, "parse error"),
     };
-    let id = value
-        .get("id")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
+    let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
     let request: JsonRpcRequest = match serde_json::from_value(value) {
         Ok(request) => request,
         Err(_) => return json_rpc_error(id, -32600, "invalid request"),
@@ -2245,37 +2303,35 @@ async fn json_rpc(
                 Err(error) => Err(error.into()),
             }
         }
-        "registerBranch" => {
-            match serde_json::from_value::<CompatBranchRequest>(request.params) {
-                Ok(params) => {
-                    let gid = params.gid.clone();
-                    match compat_registration_from_request(&state, params) {
-                        Ok(registration) => {
-                            match apply_compat_registration(&state, &gid, registration).await {
-                                Ok(transaction) => {
-                                    audit_transition(
-                                        &state.audit_history,
-                                        "dtm.compat.json_rpc.register_branch",
-                                        &transaction,
-                                    );
-                                    Ok(serde_json::json!({}))
-                                }
-                                Err(error) => {
-                                    audit_compat_failure(
-                                        &state.audit_history,
-                                        "dtm.compat.json_rpc.register_branch",
-                                        Some(&gid),
-                                    );
-                                    Err(error)
-                                }
+        "registerBranch" => match serde_json::from_value::<CompatBranchRequest>(request.params) {
+            Ok(params) => {
+                let gid = params.gid.clone();
+                match compat_registration_from_request(&state, params) {
+                    Ok(registration) => {
+                        match apply_compat_registration(&state, &gid, registration).await {
+                            Ok(transaction) => {
+                                audit_transition(
+                                    &state.audit_history,
+                                    "dtm.compat.json_rpc.register_branch",
+                                    &transaction,
+                                );
+                                Ok(serde_json::json!({}))
+                            }
+                            Err(error) => {
+                                audit_compat_failure(
+                                    &state.audit_history,
+                                    "dtm.compat.json_rpc.register_branch",
+                                    Some(&gid),
+                                );
+                                Err(error)
                             }
                         }
-                        Err(error) => Err(error),
                     }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error.into()),
             }
-        }
+            Err(error) => Err(error.into()),
+        },
         _ => return json_rpc_error(id, -32601, "method not found"),
     };
     match result {
@@ -2323,14 +2379,22 @@ fn compat_transaction(
         }
         let branch = match kind {
             TransactionKind::Saga => {
-                let compensate = step.get("compensate").context("step compensate is required")?;
+                let compensate = step
+                    .get("compensate")
+                    .context("step compensate is required")?;
                 policy.validate(compensate)?;
                 Branch::saga(id, action, compensate, payload)
             }
             TransactionKind::Workflow => {
-                let compensate = step.get("compensate").context("step compensate is required")?;
+                let compensate = step
+                    .get("compensate")
+                    .context("step compensate is required")?;
                 policy.validate(compensate)?;
-                let dependencies = if index == 0 { Vec::new() } else { vec![format!("{:02}", index)] };
+                let dependencies = if index == 0 {
+                    Vec::new()
+                } else {
+                    vec![format!("{:02}", index)]
+                };
                 Branch::workflow(id, action, compensate, dependencies, payload)
             }
             TransactionKind::Message => Branch::message(id, action, payload),
@@ -2367,8 +2431,8 @@ fn apply_compat_message_custom(
     else {
         return Ok(());
     };
-    let value: serde_json::Value = serde_json::from_str(custom_data)
-        .context("Message custom_data must be valid JSON")?;
+    let value: serde_json::Value =
+        serde_json::from_str(custom_data).context("Message custom_data must be valid JSON")?;
     if value.get("delay").is_none() {
         return Ok(());
     }
@@ -2558,8 +2622,16 @@ transition_handler!(prepare_xa, prepare_xa, "dtm.xa.prepare");
 transition_handler!(commit_xa, commit_xa, "dtm.xa.commit");
 transition_handler!(rollback_xa, rollback_xa, "dtm.xa.rollback");
 transition_handler!(recover_transaction, recover, "dtm.transaction.recover");
-transition_handler!(force_stop_transaction, force_stop, "dtm.transaction.force_stop");
-transition_handler!(reset_retry_transaction, reset_retry, "dtm.transaction.reset_retry");
+transition_handler!(
+    force_stop_transaction,
+    force_stop,
+    "dtm.transaction.force_stop"
+);
+transition_handler!(
+    reset_retry_transaction,
+    reset_retry,
+    "dtm.transaction.reset_retry"
+);
 
 async fn get_transaction(
     State(state): State<ControlState>,
@@ -2627,12 +2699,7 @@ async fn list_transactions(
                 total,
             })
         }
-        Err(error) => operation_error(
-            &state.audit_history,
-            "dtm.transaction.list",
-            None,
-            &error,
-        ),
+        Err(error) => operation_error(&state.audit_history, "dtm.transaction.list", None, &error),
     }
 }
 
@@ -2654,20 +2721,12 @@ async fn recover_all(State(state): State<ControlState>, headers: HeaderMap) -> H
                 transaction_count = count,
                 "DTM recovery tick completed"
             );
-            state.audit_history.record(
-                "dtm.recovery.tick",
-                "success",
-                None,
-                None,
-            );
+            state
+                .audit_history
+                .record("dtm.recovery.tick", "success", None, None);
             ok_response(RecoveryResult { recovered, count })
         }
-        Err(error) => operation_error(
-            &state.audit_history,
-            "dtm.recovery.tick",
-            None,
-            &error,
-        ),
+        Err(error) => operation_error(&state.audit_history, "dtm.recovery.tick", None, &error),
     }
 }
 
@@ -2706,27 +2765,17 @@ async fn dashboard_snapshot(
         return unauthorized_response();
     }
     match state.dtm.list().await {
-        Ok(transactions) => match build_dashboard_snapshot(
-            transactions,
-            query,
-            state.audit_history.latest(),
-        ) {
-            Ok(snapshot) => ok_response(snapshot),
-            Err(message) => error_response(StatusCode::BAD_REQUEST, message),
-        },
-        Err(error) => operation_error(
-            &state.audit_history,
-            "dtm.dashboard.get",
-            None,
-            &error,
-        ),
+        Ok(transactions) => {
+            match build_dashboard_snapshot(transactions, query, state.audit_history.latest()) {
+                Ok(snapshot) => ok_response(snapshot),
+                Err(message) => error_response(StatusCode::BAD_REQUEST, message),
+            }
+        }
+        Err(error) => operation_error(&state.audit_history, "dtm.dashboard.get", None, &error),
     }
 }
 
-async fn xa_reconciliation(
-    State(state): State<ControlState>,
-    headers: HeaderMap,
-) -> HttpResponse {
+async fn xa_reconciliation(State(state): State<ControlState>, headers: HeaderMap) -> HttpResponse {
     if !authorize(&state, &headers) {
         return unauthorized_response();
     }
@@ -2793,7 +2842,7 @@ fn build_xa_reconciliation(transactions: Vec<Transaction>) -> XaReconciliationSn
     }
     snapshot
         .items
-        .sort_by(|left, right| right.updated_at_millis.cmp(&left.updated_at_millis));
+        .sort_by_key(|transaction| Reverse(transaction.updated_at_millis));
     snapshot
 }
 
@@ -2803,13 +2852,11 @@ fn xa_reconciliation_state(transaction: &Transaction) -> Option<&'static str> {
     }
     match transaction.status {
         TransactionStatus::Submitted | TransactionStatus::Prepared => Some("awaiting_decision"),
-        TransactionStatus::Succeeding | TransactionStatus::Aborting => {
-            Some("phase2_in_progress")
-        }
+        TransactionStatus::Succeeding | TransactionStatus::Aborting => Some("phase2_in_progress"),
         TransactionStatus::Failed => Some("manual_reconciliation_required"),
-        TransactionStatus::Trying
-        | TransactionStatus::Succeeded
-        | TransactionStatus::Aborted => None,
+        TransactionStatus::Trying | TransactionStatus::Succeeded | TransactionStatus::Aborted => {
+            None
+        }
     }
 }
 
@@ -2960,17 +3007,25 @@ fn dashboard_available_actions(transaction: &Transaction) -> Vec<String> {
     }
     let mut actions = Vec::with_capacity(2);
     if transaction.branches.iter().any(|branch| {
-            matches!(
-                branch.status,
-                BranchStatus::Failed | BranchStatus::Running | BranchStatus::Compensating
-            )
-        })
-        || is_callback_workflow(transaction)
+        matches!(
+            branch.status,
+            BranchStatus::Failed | BranchStatus::Running | BranchStatus::Compensating
+        )
+    }) || is_callback_workflow(transaction)
     {
         actions.push("reset-retry".to_owned());
     }
     actions.push("force-stop".to_owned());
     actions
+}
+
+fn is_callback_workflow(transaction: &Transaction) -> bool {
+    transaction.kind == TransactionKind::Workflow
+        && transaction.branches.is_empty()
+        && transaction
+            .metadata
+            .get("dtm.query_prepared")
+            .is_some_and(|value| !value.is_empty())
 }
 
 fn dashboard_next_retry_millis(transaction: &Transaction) -> Option<u64> {
@@ -2981,7 +3036,10 @@ fn dashboard_next_retry_millis(transaction: &Transaction) -> Option<u64> {
         .min();
     let message_delivery = (transaction.kind == TransactionKind::Message
         && transaction.status == TransactionStatus::Succeeding
-        && transaction.branches.iter().all(|branch| branch.attempts == 0))
+        && transaction
+            .branches
+            .iter()
+            .all(|branch| branch.attempts == 0))
     .then(|| {
         transaction
             .options
@@ -3119,7 +3177,7 @@ fn build_transaction(
         return Err("delay_millis is only supported by Message transactions");
     }
     transaction.options = request.options;
-    if validate_saga_dependencies(&transaction).is_err() {
+    if validate_transaction_dependencies(&transaction).is_err() {
         return Err("concurrent options or Saga dependencies are invalid");
     }
     if let Some(timeout) = request.timeout_millis {
@@ -3485,10 +3543,7 @@ mod tests {
     #[test]
     fn embedded_openapi_contract_is_versioned_and_covers_all_routes() {
         assert_eq!(OPENAPI_DOCUMENT["openapi"], "3.1.0");
-        assert_eq!(
-            OPENAPI_DOCUMENT["info"]["title"],
-            "Roze DTM API"
-        );
+        assert_eq!(OPENAPI_DOCUMENT["info"]["title"], "Roze DTM API");
         assert_eq!(
             OPENAPI_DOCUMENT["paths"]
                 .as_object()
@@ -3575,7 +3630,10 @@ mod tests {
             allowed_branch_origins: vec!["http://inventory".to_owned()],
             ..DtmConfig::default()
         };
-        assert!(config.alert_webhook_config().expect("disabled alert").is_none());
+        assert!(config
+            .alert_webhook_config()
+            .expect("disabled alert")
+            .is_none());
 
         config.alert_webhook_url = Some("https://alerts.example.com/dtm?token=secret".to_owned());
         let alert = config
@@ -3645,8 +3703,7 @@ mod tests {
             config.release_revision = Some(invalid.to_owned());
             assert!(config.validate(true).is_err());
         }
-        config.release_revision =
-            Some("ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_owned());
+        config.release_revision = Some("ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_owned());
         config.validate(true).expect("valid release revision");
     }
 
@@ -3733,7 +3790,10 @@ mod tests {
             steps: (0..3)
                 .map(|index| {
                     [
-                        ("action".to_owned(), format!("http://inventory/action-{index}")),
+                        (
+                            "action".to_owned(),
+                            format!("http://inventory/action-{index}"),
+                        ),
                         (
                             "compensate".to_owned(),
                             format!("http://inventory/compensate-{index}"),
@@ -3747,8 +3807,8 @@ mod tests {
             custom_data: Some(r#"{"concurrent":true,"orders":{"2":[0,1]}}"#.to_owned()),
             ..CompatTransactionRequest::default()
         };
-        let policy = BranchUrlPolicy::from_allowed_origins(["http://inventory"])
-            .expect("branch policy");
+        let policy =
+            BranchUrlPolicy::from_allowed_origins(["http://inventory"]).expect("branch policy");
         let transaction = compat_transaction(TransactionKind::Saga, &request, &policy)
             .expect("concurrent Saga compatibility request");
 
@@ -3759,7 +3819,7 @@ mod tests {
             transaction.branches[2].dependencies,
             vec!["01".to_owned(), "02".to_owned()]
         );
-        validate_saga_dependencies(&transaction).expect("valid mapped Saga graph");
+        validate_transaction_dependencies(&transaction).expect("valid mapped Saga graph");
     }
 
     #[test]
@@ -3779,13 +3839,13 @@ mod tests {
             concurrent: true,
             ..CompatTransactionRequest::default()
         };
-        let policy = BranchUrlPolicy::from_allowed_origins(["http://events"])
-            .expect("branch policy");
+        let policy =
+            BranchUrlPolicy::from_allowed_origins(["http://events"]).expect("branch policy");
         let transaction = compat_transaction(TransactionKind::Message, &request, &policy)
             .expect("concurrent Message compatibility request");
 
         assert!(transaction.options.concurrent);
-        validate_saga_dependencies(&transaction).expect("valid concurrent Message options");
+        validate_transaction_dependencies(&transaction).expect("valid concurrent Message options");
     }
 
     #[test]
@@ -3793,17 +3853,15 @@ mod tests {
         let request = CompatTransactionRequest {
             gid: "message-delay".to_owned(),
             trans_type: "msg".to_owned(),
-            steps: vec![[
-                ("action".to_owned(), "http://events/publish".to_owned()),
-            ]
-            .into_iter()
-            .collect()],
+            steps: vec![[("action".to_owned(), "http://events/publish".to_owned())]
+                .into_iter()
+                .collect()],
             payloads: vec![serde_json::json!({})],
             custom_data: Some(r#"{"delay":10}"#.to_owned()),
             ..CompatTransactionRequest::default()
         };
-        let policy = BranchUrlPolicy::from_allowed_origins(["http://events"])
-            .expect("branch policy");
+        let policy =
+            BranchUrlPolicy::from_allowed_origins(["http://events"]).expect("branch policy");
         let transaction = compat_transaction(TransactionKind::Message, &request, &policy)
             .expect("delayed Message compatibility request");
 
@@ -3832,9 +3890,12 @@ mod tests {
         )
         .expect("completion")
         .expect("callback completion");
-        assert_eq!(completion.0, TransactionStatus::Failed);
-        assert_eq!(completion.1.as_deref(), Some("business failure"));
-        assert_eq!(completion.2.as_deref(), Some("cmVzdWx0"));
+        assert_eq!(completion.status, TransactionStatus::Failed);
+        assert_eq!(
+            completion.rollback_reason.as_deref(),
+            Some("business failure")
+        );
+        assert_eq!(completion.result.as_deref(), Some("cmVzdWx0"));
     }
 
     #[test]
@@ -3999,9 +4060,7 @@ mod tests {
         assert!(metrics.contains(
             "roze_dtm_branch_state_observations_total{kind=\"tcc\",status=\"failed\"} 1"
         ));
-        assert!(metrics.contains(
-            "roze_dtm_retry_scheduled_observations_total{kind=\"tcc\"} 1"
-        ));
+        assert!(metrics.contains("roze_dtm_retry_scheduled_observations_total{kind=\"tcc\"} 1"));
         for secret in [
             "secret-gid",
             "secret-branch-id",
@@ -4080,15 +4139,15 @@ mod tests {
         transaction.options.delay_millis = Some(10_000);
         let expected = transaction.created_at_millis + 10_000;
 
-        let snapshot = build_dashboard_snapshot(
-            vec![transaction],
-            TransactionQuery::default(),
-            Vec::new(),
-        )
-        .expect("delayed Message dashboard snapshot");
+        let snapshot =
+            build_dashboard_snapshot(vec![transaction], TransactionQuery::default(), Vec::new())
+                .expect("delayed Message dashboard snapshot");
 
         assert_eq!(snapshot.summary.retry_scheduled, 1);
-        assert_eq!(snapshot.transactions.items[0].next_retry_millis, Some(expected));
+        assert_eq!(
+            snapshot.transactions.items[0].next_retry_millis,
+            Some(expected)
+        );
         assert_eq!(
             snapshot.transactions.items[0].available_actions,
             vec!["force-stop".to_owned()]
@@ -4151,7 +4210,9 @@ mod tests {
         assert_eq!(latest.len(), DASHBOARD_AUDIT_LIMIT);
         assert_eq!(latest[0].sequence, (DASHBOARD_AUDIT_CAPACITY + 20) as u64);
         assert_eq!(latest[0].resource_id.as_deref(), Some("gid-219"));
-        assert!(latest.windows(2).all(|pair| pair[0].sequence > pair[1].sequence));
+        assert!(latest
+            .windows(2)
+            .all(|pair| pair[0].sequence > pair[1].sequence));
 
         let stored = history
             .events

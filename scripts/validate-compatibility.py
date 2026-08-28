@@ -39,7 +39,7 @@ expected_http = {
     ("POST", "/api/json-rpc"),
 }
 route_calls = re.findall(
-    r'\.route\("([^"]+)",\s*(get|post|delete)\(', SERVICE
+    r'\.route\(\s*"([^"]+)",\s*(get|post|delete)\(', SERVICE
 )
 actual_http = {(method.upper(), path) for path, method in route_calls}
 missing_http = expected_http - actual_http

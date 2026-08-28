@@ -30,15 +30,20 @@
 - 上游数据库自增 `id` 不是事务身份；兼容 DTO 返回文档化的 `id: 0`，所有业务和管理操作以 `gid` 为唯一标识。
 - 上游 Redis/BoltDB 的 `DataExpire`/`FinishedDataExpire` 是存储保留策略，不是事务协议。当前项目未声明自动删除事务；生产环境应在取得真实恢复/审计保留要求后设计可审计清理策略，不能在迁移中静默删除协调记录。
 
-## 当前唯一剩余门槛
+## 编译禁令解除后的验收进展
 
-静态迁移收口不等于完整目标已经通过验收。以下事项都需要解除编译禁令、启动真实依赖或运行较长时间，当前不能用更多源码声明替代：
+- `cargo fmt --all -- --check`、`cargo check --workspace --all-targets`、Clippy `-D warnings` 和 workspace 全目标测试已经通过，包含 proto 生成、Workflow DAG 与 XA 源码测试。
+- 使用 `service/config.sqlite.smoke.yaml` 启动的真实 Roze 服务已经通过 HTTP 五事务模式、JSON-RPC Saga、Rust gRPC 客户端、受保护 Dashboard/管理动作、指标检查和可恢复 Message 503 分支故障。
+- `tests/xa_backends.rs` 与 CI 真实依赖矩阵已覆盖 PostgreSQL/MySQL XA Commit/Rollback/屏障/对账、Redis standalone 和三节点 Redis Cluster；本机缺少 Docker 与这些服务，最终结果必须由当前提交对应的 GitHub Actions 证明。
 
-1. `cargo fmt --check`、`cargo check`、Clippy 和 workspace/目标测试，包含 proto 生成及所有源码测试。
-2. 固定 dtm-labs Go 客户端与 Rust/TypeScript/JavaScript 客户端的 HTTP、JSON-RPC、gRPC 五模式互操作矩阵。
-3. SQLite、PostgreSQL、MySQL、Redis standalone/Cluster 的真实持久化、并发注册、租约、revision CAS、屏障、Workflow、KV/topic 和升级读取。
-4. XA 在 MySQL/PostgreSQL 的 Prepare/Commit/Rollback、prepared 对账、启发式处置及各崩溃点恢复。
-5. 分支超时、409/425、JSON-RPC/gRPC callback、重定向拒绝、告警失败、网络分区、进程重启和多 worker 接管故障注入。
-6. 真实服务上的 Dashboard 鉴权/管理动作/审计、指标数值变化、生产只读 smoke，以及 24h/72h soak 和证据晋级。
+## 剩余运行门槛
 
-在这些运行门槛完成前，`docs/roadmap.md` 和 `docs/production-validation.md` 中相应能力保持“已支持核心/部分支持”或 `inconclusive`，不得标记为生产稳定。
+以下事项不能用更多源码声明或一次短时 smoke 替代：
+
+1. 固定 dtm-labs Go/Node 客户端与 Rust/TypeScript/JavaScript 客户端的完整跨语言互操作，特别是 callback Workflow 错误码、TLS、超时和终态竞争。
+2. PostgreSQL/MySQL/Redis CI 矩阵通过后，继续覆盖 Redis MOVED/ASK、节点重启、主从切换、网络分区，以及关系型存储升级读取和多 worker 接管。
+3. XA 在 Prepare 前后、分支注册后、全局决策后发生进程崩溃或网络超时的恢复，以及未知 XID。
+4. 真实 HTTPS 告警接收端、重定向拒绝、进程重启、持久审计 sink 和 Dashboard 暗色模式端到端。
+5. 绑定确切 Git revision 的 24h/72h soak、资源趋势、错误预算和故障时间线证据。
+
+因此当前判定为“源码与静态迁移已收口，完整本地短时验收已通过；真实依赖结果等待当前提交 CI，生产稳定性仍为 `inconclusive`”。在剩余运行门槛完成前，`docs/roadmap.md` 和 `docs/production-validation.md` 不得标记为生产稳定。

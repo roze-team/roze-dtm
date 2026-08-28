@@ -5,8 +5,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BranchKind, KvEntry, Transaction, TransactionKind, TransactionOptions,
-    WorkflowProgressStatus,
+    BranchKind, KvEntry, Transaction, TransactionKind, TransactionOptions, WorkflowProgressStatus,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,11 +149,7 @@ impl DtmHttpClient {
     ///
     /// The business closure must return failures instead of panicking so the
     /// client can persist the rollback decision.
-    pub async fn xa_global_transaction<T, F, Fut>(
-        &self,
-        gid: &str,
-        work: F,
-    ) -> anyhow::Result<T>
+    pub async fn xa_global_transaction<T, F, Fut>(&self, gid: &str, work: F) -> anyhow::Result<T>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = anyhow::Result<T>>,
@@ -216,7 +211,10 @@ impl DtmHttpClient {
 
     pub async fn get(&self, gid: &str) -> anyhow::Result<Transaction> {
         let response = self
-            .authorized(self.client.get(format!("{}/v1/transactions/{gid}", self.base_url)))
+            .authorized(
+                self.client
+                    .get(format!("{}/v1/transactions/{gid}", self.base_url)),
+            )
             .send()
             .await?;
         decode_transaction(response).await
@@ -224,12 +222,18 @@ impl DtmHttpClient {
 
     pub async fn compat_new_gid(&self) -> anyhow::Result<String> {
         let response = self
-            .authorized(self.client.get(format!("{}/api/dtmsvr/newGid", self.base_url)))
+            .authorized(
+                self.client
+                    .get(format!("{}/api/dtmsvr/newGid", self.base_url)),
+            )
             .send()
             .await?;
         let status = response.status();
         let value: serde_json::Value = response.json().await?;
-        anyhow::ensure!(status.is_success(), "DTM newGid failed with status {status}");
+        anyhow::ensure!(
+            status.is_success(),
+            "DTM newGid failed with status {status}"
+        );
         value
             .get("gid")
             .and_then(serde_json::Value::as_str)
@@ -270,7 +274,10 @@ impl DtmHttpClient {
             !workflow_name.is_empty() && workflow_name.len() <= 128,
             "callback workflow name must contain 1 to 128 bytes"
         );
-        anyhow::ensure!(data.len() <= 2 * 1024 * 1024, "callback workflow data exceeds 2 MiB");
+        anyhow::ensure!(
+            data.len() <= 2 * 1024 * 1024,
+            "callback workflow data exceeds 2 MiB"
+        );
         let custom_data = serde_json::json!({
             "name": workflow_name,
             "data": BASE64_STANDARD.encode(data),
@@ -288,8 +295,9 @@ impl DtmHttpClient {
         status: WorkflowProgressStatus,
         data: &[u8],
     ) -> anyhow::Result<()> {
-        let data = std::str::from_utf8(data)
-            .context("HTTP callback workflow progress data must be UTF-8; use gRPC for binary data")?;
+        let data = std::str::from_utf8(data).context(
+            "HTTP callback workflow progress data must be UTF-8; use gRPC for binary data",
+        )?;
         let status = match status {
             WorkflowProgressStatus::Succeeded => "succeed",
             WorkflowProgressStatus::Failed => "failed",
@@ -356,11 +364,8 @@ impl DtmHttpClient {
     }
 
     pub async fn unsubscribe_topic(&self, topic: &str, url: &str) -> anyhow::Result<()> {
-        self.compat_topic_operation(
-            "/api/dtmsvr/unsubscribe",
-            &[("topic", topic), ("url", url)],
-        )
-        .await
+        self.compat_topic_operation("/api/dtmsvr/unsubscribe", &[("topic", topic), ("url", url)])
+            .await
     }
 
     pub async fn delete_topic(&self, topic: &str) -> anyhow::Result<()> {
@@ -394,9 +399,17 @@ impl DtmHttpClient {
             .await?;
         let status = response.status();
         let value: serde_json::Value = response.json().await?;
-        anyhow::ensure!(status.is_success(), "DTM KV query failed with status {status}");
-        serde_json::from_value(value.get("kv").cloned().context("KV response did not contain kv")?)
-            .map_err(Into::into)
+        anyhow::ensure!(
+            status.is_success(),
+            "DTM KV query failed with status {status}"
+        );
+        serde_json::from_value(
+            value
+                .get("kv")
+                .cloned()
+                .context("KV response did not contain kv")?,
+        )
+        .map_err(Into::into)
     }
 
     fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -425,15 +438,13 @@ impl DtmHttpClient {
     async fn compat_xa_operation(&self, path: &str, gid: &str) -> anyhow::Result<()> {
         anyhow::ensure!(!gid.is_empty() && gid.len() <= 128, "invalid XA gid");
         let response = self
-            .authorized(
-                self.client
-                    .post(format!("{}{}", self.base_url, path))
-                    .json(&serde_json::json!({
-                        "gid": gid,
-                        "trans_type": "xa",
-                        "wait_result": true,
-                    })),
-            )
+            .authorized(self.client.post(format!("{}{}", self.base_url, path)).json(
+                &serde_json::json!({
+                    "gid": gid,
+                    "trans_type": "xa",
+                    "wait_result": true,
+                }),
+            ))
             .send()
             .await?;
         decode_compat_success(response).await
@@ -455,7 +466,10 @@ impl DtmHttpClient {
 async fn decode_compat_success(response: reqwest::Response) -> anyhow::Result<()> {
     let status = response.status();
     let value: serde_json::Value = response.json().await?;
-    anyhow::ensure!(status.is_success(), "DTM request failed with status {status}");
+    anyhow::ensure!(
+        status.is_success(),
+        "DTM request failed with status {status}"
+    );
     anyhow::ensure!(
         value.get("dtm_result").and_then(serde_json::Value::as_str) == Some("SUCCESS"),
         "DTM compatibility request failed"
@@ -466,8 +480,14 @@ async fn decode_compat_success(response: reqwest::Response) -> anyhow::Result<()
 async fn decode_transaction(response: reqwest::Response) -> anyhow::Result<Transaction> {
     let status = response.status();
     let value: serde_json::Value = response.json().await?;
-    anyhow::ensure!(status.is_success(), "DTM request failed with status {status}");
-    let data = value.get("data").cloned().context("DTM response did not contain data")?;
+    anyhow::ensure!(
+        status.is_success(),
+        "DTM request failed with status {status}"
+    );
+    let data = value
+        .get("data")
+        .cloned()
+        .context("DTM response did not contain data")?;
     Ok(serde_json::from_value(data)?)
 }
 

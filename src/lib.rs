@@ -852,13 +852,7 @@ where
         result: Option<String>,
     ) -> anyhow::Result<Transaction> {
         self.inner
-            .finish_workflow_fenced(
-                gid,
-                status,
-                rollback_reason,
-                result,
-                &self.fence,
-            )
+            .finish_workflow_fenced(gid, status, rollback_reason, result, &self.fence)
             .await
     }
 
@@ -1115,7 +1109,7 @@ impl HttpBranchInvoker {
         let alert_webhook = alert_webhook
             .map(|config| {
                 config.validate()?;
-                Ok(AlertWebhook {
+                Ok::<AlertWebhook, anyhow::Error>(AlertWebhook {
                     client: branch_http_client(Some(config.timeout))?,
                     url: config.url,
                     retry_limit: config.retry_limit,
@@ -1196,7 +1190,10 @@ impl BranchInvoker for HttpBranchInvoker {
             return Ok(());
         }
         let response = webhook.client.post(&webhook.url).json(alert).send().await?;
-        anyhow::ensure!(response.status().is_success(), "alert webhook rejected notification");
+        anyhow::ensure!(
+            response.status().is_success(),
+            "alert webhook rejected notification"
+        );
         Ok(())
     }
 }
@@ -1298,8 +1295,7 @@ impl HttpBranchInvoker {
             insert_grpc_metadata(&mut request, &name.to_ascii_lowercase(), value)?;
         }
         let path = http::uri::PathAndQuery::from_maybe_shared(target.method)?;
-        let codec =
-            tonic_prost::ProstCodec::<CallbackWorkflowData, CallbackEmpty>::default();
+        let codec = tonic_prost::ProstCodec::<CallbackWorkflowData, CallbackEmpty>::default();
         let result: Result<tonic::Response<CallbackEmpty>, tonic::Status> =
             grpc.unary(request, path, codec).await;
         match result {
@@ -1909,12 +1905,7 @@ impl TransactionStore for SqliteTransactionStore {
                 .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
             let previous_payload = row.get::<&str, _>("payload").to_owned();
             let mut tx: Transaction = serde_json::from_str(&previous_payload)?;
-            apply_workflow_completion(
-                &mut tx,
-                status,
-                rollback_reason.clone(),
-                result.clone(),
-            )?;
+            apply_workflow_completion(&mut tx, status, rollback_reason.clone(), result.clone())?;
             let payload = serde_json::to_string(&tx)?;
             let changed = sqlx::query(
                 "UPDATE roze_dtm_transactions SET payload = ?, updated_at_millis = ? \
@@ -2053,13 +2044,15 @@ impl TransactionStore for SqliteTransactionStore {
     }
 
     async fn delete_kv(&self, category: &str, key: &str) -> anyhow::Result<bool> {
-        Ok(sqlx::query("DELETE FROM roze_dtm_kv WHERE category = ? AND entry_key = ?")
-            .bind(category)
-            .bind(key)
-            .execute(&self.pool)
-            .await?
-            .rows_affected()
-            == 1)
+        Ok(
+            sqlx::query("DELETE FROM roze_dtm_kv WHERE category = ? AND entry_key = ?")
+                .bind(category)
+                .bind(key)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                == 1,
+        )
     }
 
     async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision> {
@@ -2281,13 +2274,12 @@ impl TransactionStore for PostgresTransactionStore {
 
     async fn register_branch(&self, gid: &str, branch: Branch) -> anyhow::Result<Transaction> {
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT payload FROM roze_dtm_transactions WHERE gid = $1 FOR UPDATE",
-        )
-        .bind(gid)
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        let row =
+            sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = $1 FOR UPDATE")
+                .bind(gid)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
         append_dynamic_branch(&mut tx, branch)?;
         let payload = serde_json::to_string(&tx)?;
@@ -2309,13 +2301,12 @@ impl TransactionStore for PostgresTransactionStore {
         progress: WorkflowProgress,
     ) -> anyhow::Result<Transaction> {
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT payload FROM roze_dtm_transactions WHERE gid = $1 FOR UPDATE",
-        )
-        .bind(gid)
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        let row =
+            sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = $1 FOR UPDATE")
+                .bind(gid)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
         append_workflow_progress(&mut tx, progress)?;
         let payload = serde_json::to_string(&tx)?;
@@ -2339,13 +2330,12 @@ impl TransactionStore for PostgresTransactionStore {
         result: Option<String>,
     ) -> anyhow::Result<Transaction> {
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT payload FROM roze_dtm_transactions WHERE gid = $1 FOR UPDATE",
-        )
-        .bind(gid)
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        let row =
+            sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = $1 FOR UPDATE")
+                .bind(gid)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
         apply_workflow_completion(&mut tx, status, rollback_reason, result)?;
         let payload = serde_json::to_string(&tx)?;
@@ -2367,13 +2357,12 @@ impl TransactionStore for PostgresTransactionStore {
         delay: WorkflowRecoveryDelay,
     ) -> anyhow::Result<Transaction> {
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT payload FROM roze_dtm_transactions WHERE gid = $1 FOR UPDATE",
-        )
-        .bind(gid)
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        let row =
+            sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = $1 FOR UPDATE")
+                .bind(gid)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
         defer_workflow_recovery(&mut tx, delay)?;
         let payload = serde_json::to_string(&tx)?;
@@ -2474,13 +2463,15 @@ impl TransactionStore for PostgresTransactionStore {
     }
 
     async fn delete_kv(&self, category: &str, key: &str) -> anyhow::Result<bool> {
-        Ok(sqlx::query("DELETE FROM roze_dtm_kv WHERE category = $1 AND entry_key = $2")
-            .bind(category)
-            .bind(key)
-            .execute(&self.pool)
-            .await?
-            .rows_affected()
-            == 1)
+        Ok(
+            sqlx::query("DELETE FROM roze_dtm_kv WHERE category = $1 AND entry_key = $2")
+                .bind(category)
+                .bind(key)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                == 1,
+        )
     }
 
     async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision> {
@@ -2714,13 +2705,11 @@ impl TransactionStore for MySqlTransactionStore {
 
     async fn register_branch(&self, gid: &str, branch: Branch) -> anyhow::Result<Transaction> {
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT payload FROM roze_dtm_transactions WHERE gid = ? FOR UPDATE",
-        )
-        .bind(gid)
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        let row = sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = ? FOR UPDATE")
+            .bind(gid)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
         append_dynamic_branch(&mut tx, branch)?;
         let payload = serde_json::to_string(&tx)?;
@@ -2742,13 +2731,11 @@ impl TransactionStore for MySqlTransactionStore {
         progress: WorkflowProgress,
     ) -> anyhow::Result<Transaction> {
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT payload FROM roze_dtm_transactions WHERE gid = ? FOR UPDATE",
-        )
-        .bind(gid)
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        let row = sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = ? FOR UPDATE")
+            .bind(gid)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
         append_workflow_progress(&mut tx, progress)?;
         let payload = serde_json::to_string(&tx)?;
@@ -2772,13 +2759,11 @@ impl TransactionStore for MySqlTransactionStore {
         result: Option<String>,
     ) -> anyhow::Result<Transaction> {
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT payload FROM roze_dtm_transactions WHERE gid = ? FOR UPDATE",
-        )
-        .bind(gid)
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        let row = sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = ? FOR UPDATE")
+            .bind(gid)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
         apply_workflow_completion(&mut tx, status, rollback_reason, result)?;
         let payload = serde_json::to_string(&tx)?;
@@ -2800,13 +2785,11 @@ impl TransactionStore for MySqlTransactionStore {
         delay: WorkflowRecoveryDelay,
     ) -> anyhow::Result<Transaction> {
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query(
-            "SELECT payload FROM roze_dtm_transactions WHERE gid = ? FOR UPDATE",
-        )
-        .bind(gid)
-        .fetch_optional(&mut *transaction)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        let row = sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = ? FOR UPDATE")
+            .bind(gid)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
         defer_workflow_recovery(&mut tx, delay)?;
         let payload = serde_json::to_string(&tx)?;
@@ -2908,13 +2891,15 @@ impl TransactionStore for MySqlTransactionStore {
     }
 
     async fn delete_kv(&self, category: &str, key: &str) -> anyhow::Result<bool> {
-        Ok(sqlx::query("DELETE FROM roze_dtm_kv WHERE category = ? AND entry_key = ?")
-            .bind(category)
-            .bind(key)
-            .execute(&self.pool)
-            .await?
-            .rows_affected()
-            == 1)
+        Ok(
+            sqlx::query("DELETE FROM roze_dtm_kv WHERE category = ? AND entry_key = ?")
+                .bind(category)
+                .bind(key)
+                .execute(&self.pool)
+                .await?
+                .rows_affected()
+                == 1,
+        )
     }
 
     async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision> {
@@ -3103,7 +3088,7 @@ where
             tx.kind == TransactionKind::Message || tx.options.delay_millis.is_none(),
             "delay_millis is only supported by Message transactions"
         );
-        validate_saga_dependencies(&tx)?;
+        validate_transaction_dependencies(&tx)?;
         if tx.kind == TransactionKind::Message {
             self.expand_message_topics(&mut tx).await?;
         }
@@ -3185,10 +3170,7 @@ where
             .await
     }
 
-    pub async fn recover_callback_workflow(
-        &self,
-        gid: &str,
-    ) -> anyhow::Result<Transaction> {
+    pub async fn recover_callback_workflow(&self, gid: &str) -> anyhow::Result<Transaction> {
         let tx = self
             .transaction_of_kind(gid, TransactionKind::Workflow)
             .await?;
@@ -3208,12 +3190,7 @@ where
                     "Workflow callback contract is invalid"
                 );
                 return self
-                    .defer_callback_workflow(
-                        &tx,
-                        attempted_at_millis,
-                        true,
-                        "invalid_callback",
-                    )
+                    .defer_callback_workflow(&tx, attempted_at_millis, true, "invalid_callback")
                     .await;
             }
         };
@@ -3265,13 +3242,8 @@ where
                     outcome = "ongoing",
                     "Workflow callback remains ongoing"
                 );
-                self.defer_callback_workflow(
-                    &latest,
-                    attempted_at_millis,
-                    false,
-                    "ongoing",
-                )
-                .await
+                self.defer_callback_workflow(&latest, attempted_at_millis, false, "ongoing")
+                    .await
             }
             Ok(WorkflowCallbackResult::Completed) => {
                 tracing::warn!(
@@ -3296,13 +3268,8 @@ where
                     error_kind = "callback_transport",
                     "Workflow callback transport failed"
                 );
-                self.defer_callback_workflow(
-                    &latest,
-                    attempted_at_millis,
-                    true,
-                    "transport_error",
-                )
-                .await
+                self.defer_callback_workflow(&latest, attempted_at_millis, true, "transport_error")
+                    .await
             }
         }
     }
@@ -3372,10 +3339,7 @@ where
             .await
         {
             Ok(transaction) => Ok(transaction),
-            Err(error) => {
-                self.terminal_after_conflict(&transaction.gid, error)
-                    .await
-            }
+            Err(error) => self.terminal_after_conflict(&transaction.gid, error).await,
         }
     }
 
@@ -3423,9 +3387,7 @@ where
         {
             tx.status = TransactionStatus::Succeeding;
             self.persist_transaction(&mut tx).await?;
-        } else if tx.kind == TransactionKind::Workflow
-            && tx.status == TransactionStatus::Prepared
-        {
+        } else if tx.kind == TransactionKind::Workflow && tx.status == TransactionStatus::Prepared {
             tx.status = TransactionStatus::Submitted;
             self.persist_transaction(&mut tx).await?;
         }
@@ -3453,13 +3415,11 @@ where
                 TransactionStatus::Prepared,
                 TransactionStatus::Aborting,
             ][..],
-            TransactionKind::Saga => {
-                &[
-                    TransactionStatus::Submitted,
-                    TransactionStatus::Succeeding,
-                    TransactionStatus::Aborting,
-                ][..]
-            }
+            TransactionKind::Saga => &[
+                TransactionStatus::Submitted,
+                TransactionStatus::Succeeding,
+                TransactionStatus::Aborting,
+            ][..],
             TransactionKind::Workflow => &[
                 TransactionStatus::Submitted,
                 TransactionStatus::Prepared,
@@ -3598,13 +3558,7 @@ where
                     if let Some(compensate) = branch.compensate.clone() {
                         branch.attempts = branch.attempts.saturating_add(1);
                         if self
-                            .invoke_url(
-                                &execution_options,
-                                &tx.gid,
-                                tx.status,
-                                branch,
-                                &compensate,
-                            )
+                            .invoke_url(&execution_options, &tx.gid, tx.status, branch, &compensate)
                             .await
                             .is_err()
                         {
@@ -3634,11 +3588,8 @@ where
         Ok(tx)
     }
 
-    async fn start_concurrent_saga(
-        &self,
-        mut tx: Transaction,
-    ) -> anyhow::Result<Transaction> {
-        validate_saga_dependencies(&tx)?;
+    async fn start_concurrent_saga(&self, mut tx: Transaction) -> anyhow::Result<Transaction> {
+        validate_transaction_dependencies(&tx)?;
         let execution_options = tx.options.clone();
         let max_attempts = execution_options
             .retry_limit
@@ -3751,8 +3702,7 @@ where
                     result.context("concurrent Saga action task failed")?;
                 tx.branches[index] = branch;
                 if !succeeded {
-                    let barrier =
-                        BranchBarrier::new(&tx.gid, &tx.branches[index].id, "action");
+                    let barrier = BranchBarrier::new(&tx.gid, &tx.branches[index].id, "action");
                     self.store.release_barrier(&barrier).await?;
                     if tx.branches[index].attempts < max_attempts {
                         retryable_failure = true;
@@ -3784,11 +3734,8 @@ where
         }
     }
 
-    async fn abort_concurrent_saga(
-        &self,
-        mut tx: Transaction,
-    ) -> anyhow::Result<Transaction> {
-        validate_saga_dependencies(&tx)?;
+    async fn abort_concurrent_saga(&self, mut tx: Transaction) -> anyhow::Result<Transaction> {
+        validate_transaction_dependencies(&tx)?;
         let execution_options = tx.options.clone();
         tx.status = TransactionStatus::Aborting;
         for branch in &mut tx.branches {
@@ -3834,8 +3781,7 @@ where
 
             let mut claimed = Vec::with_capacity(ready.len());
             for &index in &ready {
-                let barrier =
-                    BranchBarrier::new(&tx.gid, &tx.branches[index].id, "compensate");
+                let barrier = BranchBarrier::new(&tx.gid, &tx.branches[index].id, "compensate");
                 if self.store.barrier(barrier.clone()).await? != BarrierDecision::Execute {
                     for barrier in claimed {
                         self.store.release_barrier(&barrier).await?;
@@ -3904,8 +3850,7 @@ where
                 tx.branches[index] = branch;
                 if !succeeded {
                     failed = true;
-                    let barrier =
-                        BranchBarrier::new(&tx.gid, &tx.branches[index].id, "compensate");
+                    let barrier = BranchBarrier::new(&tx.gid, &tx.branches[index].id, "compensate");
                     self.store.release_barrier(&barrier).await?;
                 }
             }
@@ -4231,13 +4176,7 @@ where
                 })?;
                 branch.attempts = branch.attempts.saturating_add(1);
                 if self
-                    .invoke_url(
-                        &execution_options,
-                        &tx.gid,
-                        tx.status,
-                        branch,
-                        &compensate,
-                    )
+                    .invoke_url(&execution_options, &tx.gid, tx.status, branch, &compensate)
                     .await
                     .is_err()
                 {
@@ -4366,8 +4305,7 @@ where
                 tx.branches[index] = branch;
                 if !succeeded {
                     failed = true;
-                    let barrier =
-                        BranchBarrier::new(&tx.gid, &tx.branches[index].id, "message");
+                    let barrier = BranchBarrier::new(&tx.gid, &tx.branches[index].id, "message");
                     self.store.release_barrier(&barrier).await?;
                 }
             }
@@ -4499,8 +4437,7 @@ where
                     .cancel
                     .clone()
                     .ok_or_else(|| anyhow::anyhow!("missing XA rollback URL for {}", branch.id))?;
-                let rollback =
-                    xa_phase2_callback_url(&rollback, &tx.gid, &branch.id, "rollback")?;
+                let rollback = xa_phase2_callback_url(&rollback, &tx.gid, &branch.id, "rollback")?;
                 branch.attempts = branch.attempts.saturating_add(1);
                 if self
                     .invoke_url(&execution_options, &tx.gid, tx.status, branch, &rollback)
@@ -4546,7 +4483,10 @@ where
             .get_transaction(gid)
             .await?
             .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
-        anyhow::ensure!(!tx.status.is_terminal(), "transaction {gid} is already terminal");
+        anyhow::ensure!(
+            !tx.status.is_terminal(),
+            "transaction {gid} is already terminal"
+        );
         tx.status = TransactionStatus::Failed;
         for branch in &mut tx.branches {
             branch.next_retry_millis = None;
@@ -4573,10 +4513,8 @@ where
             }
         }
         if is_callback_workflow(&tx) {
-            tx.metadata.insert(
-                "dtm.callback.next_retry_millis".to_owned(),
-                now.to_string(),
-            );
+            tx.metadata
+                .insert("dtm.callback.next_retry_millis".to_owned(), now.to_string());
             tx.metadata.insert(
                 "dtm.callback.last_outcome".to_owned(),
                 "manual_reset".to_owned(),
@@ -4623,7 +4561,7 @@ where
                     .map(|next| (next, transaction.gid))
             })
             .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| left.cmp(right));
+        candidates.sort();
         let has_remaining = candidates.len() > limit;
         let mut reset = Vec::with_capacity(limit.min(candidates.len()));
         for (_, gid) in candidates.into_iter().take(limit) {
@@ -4673,9 +4611,9 @@ where
             return match tx.status {
                 TransactionStatus::Submitted => self.prepare_workflow(gid).await,
                 TransactionStatus::Prepared => self.recover_callback_workflow(gid).await,
-                status => anyhow::bail!(
-                    "callback workflow {gid} is in non-replayable state {status:?}"
-                ),
+                status => {
+                    anyhow::bail!("callback workflow {gid} is in non-replayable state {status:?}")
+                }
             };
         }
         match (tx.kind, tx.status) {
@@ -4777,9 +4715,7 @@ where
                 (
                     TransactionKind::Saga,
                     TransactionStatus::Submitted | TransactionStatus::Succeeding,
-                ) => {
-                    self.start_saga(&tx.gid).await?
-                }
+                ) => self.start_saga(&tx.gid).await?,
                 (TransactionKind::Saga, TransactionStatus::Aborting) => {
                     self.abort_saga(&tx.gid).await?
                 }
@@ -4896,14 +4832,7 @@ where
         branch: &Branch,
         url: &str,
     ) {
-        notify_branch_failure(
-            &self.invoker,
-            gid,
-            transaction_status,
-            branch,
-            url,
-        )
-        .await;
+        notify_branch_failure(&self.invoker, gid, transaction_status, branch, url).await;
     }
 }
 
@@ -4962,19 +4891,22 @@ fn append_dynamic_branch(tx: &mut Transaction, branch: Branch) -> anyhow::Result
     Ok(())
 }
 
-/// Validates concurrent execution options and the dependency DAG used by Saga.
-pub fn validate_saga_dependencies(transaction: &Transaction) -> anyhow::Result<()> {
+/// Validates execution options and dependency DAGs used by Saga and Workflow.
+pub fn validate_transaction_dependencies(transaction: &Transaction) -> anyhow::Result<()> {
     if transaction.kind != TransactionKind::Saga {
         anyhow::ensure!(
             transaction.kind == TransactionKind::Message || !transaction.options.concurrent,
             "options.concurrent is only supported for Saga and Message transactions"
         );
+        if transaction.kind == TransactionKind::Workflow {
+            return validate_dependency_graph(transaction, "Workflow");
+        }
         anyhow::ensure!(
             transaction
                 .branches
                 .iter()
                 .all(|branch| branch.dependencies.is_empty()),
-            "branch dependencies are only supported for Saga transactions"
+            "branch dependencies are only supported for Saga and Workflow transactions"
         );
         return Ok(());
     }
@@ -4989,6 +4921,19 @@ pub fn validate_saga_dependencies(transaction: &Transaction) -> anyhow::Result<(
         return Ok(());
     }
 
+    validate_dependency_graph(transaction, "concurrent Saga")
+}
+
+/// Backward-compatible validation entry point retained for callers that used
+/// the original Saga-only helper before Workflow dependencies were supported.
+pub fn validate_saga_dependencies(transaction: &Transaction) -> anyhow::Result<()> {
+    validate_transaction_dependencies(transaction)
+}
+
+fn validate_dependency_graph(
+    transaction: &Transaction,
+    graph_name: &'static str,
+) -> anyhow::Result<()> {
     let positions = transaction
         .branches
         .iter()
@@ -4997,25 +4942,25 @@ pub fn validate_saga_dependencies(transaction: &Transaction) -> anyhow::Result<(
         .collect::<BTreeMap<_, _>>();
     anyhow::ensure!(
         positions.len() == transaction.branches.len(),
-        "concurrent Saga branch ids must be unique"
+        "{graph_name} branch ids must be unique"
     );
     for branch in &transaction.branches {
         let mut unique = BTreeSet::new();
         for dependency in &branch.dependencies {
             anyhow::ensure!(
                 dependency != &branch.id,
-                "concurrent Saga branch {} cannot depend on itself",
+                "{graph_name} branch {} cannot depend on itself",
                 branch.id
             );
             anyhow::ensure!(
                 positions.contains_key(dependency.as_str()),
-                "concurrent Saga branch {} has unknown dependency {}",
+                "{graph_name} branch {} has unknown dependency {}",
                 branch.id,
                 dependency
             );
             anyhow::ensure!(
                 unique.insert(dependency),
-                "concurrent Saga branch {} repeats dependency {}",
+                "{graph_name} branch {} repeats dependency {}",
                 branch.id,
                 dependency
             );
@@ -5028,24 +4973,26 @@ pub fn validate_saga_dependencies(transaction: &Transaction) -> anyhow::Result<(
         positions: &BTreeMap<&str, usize>,
         visiting: &mut BTreeSet<usize>,
         visited: &mut BTreeSet<usize>,
+        graph_name: &'static str,
     ) -> anyhow::Result<()> {
         if visited.contains(&index) {
             return Ok(());
         }
         anyhow::ensure!(
             visiting.insert(index),
-            "concurrent Saga dependencies contain a cycle"
+            "{graph_name} dependencies contain a cycle"
         );
         for dependency in &branches[index].dependencies {
             let dependency_index = *positions
                 .get(dependency.as_str())
-                .expect("validated Saga dependency");
+                .expect("validated transaction dependency");
             visit(
                 dependency_index,
                 branches,
                 positions,
                 visiting,
                 visited,
+                graph_name,
             )?;
         }
         visiting.remove(&index);
@@ -5062,6 +5009,7 @@ pub fn validate_saga_dependencies(transaction: &Transaction) -> anyhow::Result<(
             &positions,
             &mut visiting,
             &mut visited,
+            graph_name,
         )?;
     }
     Ok(())
@@ -5073,16 +5021,14 @@ fn xa_phase2_callback_url(
     branch_id: &str,
     operation: &str,
 ) -> anyhow::Result<String> {
-    anyhow::ensure!(matches!(operation, "commit" | "rollback"), "invalid XA phase-2 operation");
+    anyhow::ensure!(
+        matches!(operation, "commit" | "rollback"),
+        "invalid XA phase-2 operation"
+    );
     let mut url = parse_branch_url(value)?;
     let retained = url
         .query_pairs()
-        .filter(|(name, _)| {
-            !matches!(
-                name.as_ref(),
-                "gid" | "trans_type" | "branch_id" | "op"
-            )
-        })
+        .filter(|(name, _)| !matches!(name.as_ref(), "gid" | "trans_type" | "branch_id" | "op"))
         .map(|(name, value)| (name.into_owned(), value.into_owned()))
         .collect::<Vec<_>>();
     url.set_query(None);
@@ -5146,7 +5092,10 @@ fn apply_workflow_completion(
 ) -> anyhow::Result<()> {
     ensure_callback_workflow(tx)?;
     anyhow::ensure!(
-        matches!(status, TransactionStatus::Succeeded | TransactionStatus::Failed),
+        matches!(
+            status,
+            TransactionStatus::Succeeded | TransactionStatus::Failed
+        ),
         "workflow completion status must be succeeded or failed"
     );
     let rollback_reason = rollback_reason.unwrap_or_default();
@@ -5301,9 +5250,9 @@ fn workflow_callback_request(tx: &Transaction) -> anyhow::Result<WorkflowCallbac
         WorkflowCallbackProtocol::Grpc
     } else if url.starts_with("http://") || url.starts_with("https://") {
         let legacy_json_rpc = configured_protocol.is_none()
-            && reqwest::Url::parse(&url)?.query_pairs().any(|(name, value)| {
-                name == "method" && !value.is_empty()
-            });
+            && reqwest::Url::parse(&url)?
+                .query_pairs()
+                .any(|(name, value)| name == "method" && !value.is_empty());
         if configured_protocol == Some("json-rpc") || legacy_json_rpc {
             WorkflowCallbackProtocol::JsonRpc
         } else {
@@ -5561,7 +5510,7 @@ mod tests {
 
     #[test]
     fn transaction_revision_is_monotonic_and_legacy_records_start_at_zero() {
-        let mut transaction = Transaction::tcc("revision", Vec::new());
+        let transaction = Transaction::tcc("revision", Vec::new());
         assert_eq!(transaction.revision, 1);
         let mut legacy = serde_json::to_value(&transaction).expect("serialize transaction");
         legacy
@@ -5799,6 +5748,40 @@ mod tests {
         assert!(validate_saga_dependencies(&transaction).is_err());
     }
 
+    #[test]
+    fn workflow_dependencies_must_be_known_unique_and_acyclic() {
+        let mut transaction = Transaction::workflow(
+            "gid-workflow-graph",
+            vec![
+                Branch::workflow(
+                    "a",
+                    "action-a",
+                    "compensate-a",
+                    Vec::new(),
+                    serde_json::json!({}),
+                ),
+                Branch::workflow(
+                    "b",
+                    "action-b",
+                    "compensate-b",
+                    vec!["a".to_owned()],
+                    serde_json::json!({}),
+                ),
+            ],
+        );
+        validate_transaction_dependencies(&transaction).expect("valid Workflow graph");
+
+        transaction.branches[0].dependencies = vec!["b".to_owned()];
+        assert!(validate_transaction_dependencies(&transaction).is_err());
+        transaction.branches[0].dependencies = vec!["missing".to_owned()];
+        assert!(validate_transaction_dependencies(&transaction).is_err());
+        transaction.branches[0].dependencies = vec!["a".to_owned()];
+        assert!(validate_transaction_dependencies(&transaction).is_err());
+        transaction.branches[0].dependencies = Vec::new();
+        transaction.branches[1].dependencies = vec!["a".to_owned(), "a".to_owned()];
+        assert!(validate_transaction_dependencies(&transaction).is_err());
+    }
+
     #[tokio::test]
     async fn concurrent_saga_runs_ready_layers_and_compensates_reverse_dependencies() {
         let invoker = ConcurrentSagaInvoker {
@@ -5819,7 +5802,9 @@ mod tests {
         );
         transaction.options.concurrent = true;
         transaction.branches[2].dependencies = vec!["a".to_owned(), "b".to_owned()];
-        dtm.submit(transaction).await.expect("submit concurrent Saga");
+        dtm.submit(transaction)
+            .await
+            .expect("submit concurrent Saga");
 
         let aborted = dtm
             .start_saga("gid-saga-concurrent")
@@ -5982,10 +5967,10 @@ mod tests {
             )],
         );
         transaction.options.request_timeout_millis = Some(2_000);
-        transaction.options.branch_headers.insert(
-            "x-transaction".to_owned(),
-            "transaction-a".to_owned(),
-        );
+        transaction
+            .options
+            .branch_headers
+            .insert("x-transaction".to_owned(), "transaction-a".to_owned());
         dtm.submit(transaction).await.expect("submit");
         dtm.start_saga("gid-options").await.expect("start");
 
@@ -6358,10 +6343,7 @@ mod tests {
             .await
             .expect("submit");
 
-        assert!(dtm
-            .schedule_submit("gid-tcc-not-prepared")
-            .await
-            .is_err());
+        assert!(dtm.schedule_submit("gid-tcc-not-prepared").await.is_err());
     }
 
     #[tokio::test]
@@ -6378,11 +6360,13 @@ mod tests {
         ))
         .await
         .expect("submit XA");
-        dtm.prepare_xa("gid-xa-decision")
-            .await
-            .expect("prepare XA");
+        dtm.prepare_xa("gid-xa-decision").await.expect("prepare XA");
 
-        assert!(dtm.tick_recover_once().await.expect("idle recovery").is_empty());
+        assert!(dtm
+            .tick_recover_once()
+            .await
+            .expect("idle recovery")
+            .is_empty());
         let prepared = dtm
             .store()
             .get_transaction("gid-xa-decision")
@@ -6417,7 +6401,11 @@ mod tests {
             .await
             .expect("prepare message");
 
-        assert!(dtm.tick_recover_once().await.expect("idle recovery").is_empty());
+        assert!(dtm
+            .tick_recover_once()
+            .await
+            .expect("idle recovery")
+            .is_empty());
         assert_eq!(
             dtm.store()
                 .get_transaction("gid-tcc-decision")
@@ -6451,7 +6439,10 @@ mod tests {
                 .status,
             TransactionStatus::Succeeding
         );
-        let completed = dtm.tick_recover_once().await.expect("apply submit decisions");
+        let completed = dtm
+            .tick_recover_once()
+            .await
+            .expect("apply submit decisions");
         assert_eq!(completed.len(), 2);
         assert!(completed
             .iter()
@@ -6466,7 +6457,9 @@ mod tests {
             "dtm.query_prepared".to_owned(),
             "http://workflow/callback".to_owned(),
         );
-        dtm.submit(workflow).await.expect("submit callback workflow");
+        dtm.submit(workflow)
+            .await
+            .expect("submit callback workflow");
         dtm.prepare_workflow("gid-callback-workflow")
             .await
             .expect("prepare callback workflow");
@@ -6691,7 +6684,9 @@ mod tests {
             "dtm.custom_data".to_owned(),
             serde_json::json!({"name": "order", "data": ""}).to_string(),
         );
-        dtm.submit(workflow).await.expect("submit callback workflow");
+        dtm.submit(workflow)
+            .await
+            .expect("submit callback workflow");
         dtm.prepare_workflow("gid-callback-ongoing")
             .await
             .expect("prepare callback workflow");
@@ -6727,7 +6722,9 @@ mod tests {
             "dtm.custom_data".to_owned(),
             serde_json::json!({"name": "order", "data": ""}).to_string(),
         );
-        dtm.submit(workflow).await.expect("submit callback workflow");
+        dtm.submit(workflow)
+            .await
+            .expect("submit callback workflow");
         dtm.prepare_workflow("gid-callback-recovered-failure")
             .await
             .expect("prepare callback workflow");
@@ -6748,7 +6745,9 @@ mod tests {
             "dtm.query_prepared".to_owned(),
             "http://workflow/callback".to_owned(),
         );
-        dtm.submit(workflow).await.expect("submit callback workflow");
+        dtm.submit(workflow)
+            .await
+            .expect("submit callback workflow");
         dtm.prepare_workflow("gid-callback-complete")
             .await
             .expect("prepare callback workflow");
@@ -6763,10 +6762,7 @@ mod tests {
             .await
             .expect("finish callback workflow");
         assert_eq!(completed.status, TransactionStatus::Succeeded);
-        assert_eq!(
-            completed.metadata["dtm.workflow.result"],
-            "cmVzdWx0"
-        );
+        assert_eq!(completed.metadata["dtm.workflow.result"], "cmVzdWx0");
 
         let queried = dtm
             .prepare_workflow("gid-callback-complete")
@@ -6867,7 +6863,10 @@ mod tests {
             .await
             .expect("read near retry")
             .expect("near retry exists");
-        assert_eq!(near.branches[0].next_retry_millis, Some(now.saturating_add(500)));
+        assert_eq!(
+            near.branches[0].next_retry_millis,
+            Some(now.saturating_add(500))
+        );
     }
 
     #[tokio::test]
@@ -7075,7 +7074,9 @@ mod tests {
             ],
         );
         message.options.concurrent = true;
-        dtm.submit(message).await.expect("submit concurrent message");
+        dtm.submit(message)
+            .await
+            .expect("submit concurrent message");
 
         let dispatched = dtm
             .dispatch_message("gid-message-concurrent")
@@ -7107,7 +7108,9 @@ mod tests {
             ],
         );
         message.options.concurrent = true;
-        dtm.submit(message).await.expect("submit concurrent message");
+        dtm.submit(message)
+            .await
+            .expect("submit concurrent message");
 
         let failed = dtm
             .dispatch_message("gid-message-concurrent-retry")
@@ -7185,7 +7188,10 @@ mod tests {
             .await
             .expect("skip early delayed recovery")
             .is_empty());
-        assert_eq!(transaction_next_recovery_millis(&delayed), Some(dispatch_at));
+        assert_eq!(
+            transaction_next_recovery_millis(&delayed),
+            Some(dispatch_at)
+        );
         assert!(!transaction_due(&delayed, dispatch_at - 1));
         assert!(transaction_due(&delayed, dispatch_at));
         assert_eq!(
@@ -7218,7 +7224,9 @@ mod tests {
         );
         message.created_at_millis = 0;
         message.options.delay_millis = Some(1);
-        dtm.submit(message).await.expect("submit elapsed delayed message");
+        dtm.submit(message)
+            .await
+            .expect("submit elapsed delayed message");
 
         let dispatched = dtm
             .dispatch_message("gid-message-delay-elapsed")
@@ -7255,10 +7263,7 @@ mod tests {
         assert_eq!(transaction.branches[0].id, "publish-01");
         assert_eq!(transaction.branches[0].action, "http://billing/orders");
         assert_eq!(transaction.branches[1].id, "publish-02");
-        assert_eq!(
-            transaction.branches[1].action,
-            "http://warehouse/orders"
-        );
+        assert_eq!(transaction.branches[1].action, "http://warehouse/orders");
     }
 
     #[tokio::test]

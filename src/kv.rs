@@ -66,11 +66,8 @@ pub async fn subscribe<S: TransactionStore + ?Sized>(
                     url: url.to_owned(),
                     remark: remark.to_owned(),
                 }];
-                let entry = KvEntry::new(
-                    TOPICS_CATEGORY,
-                    topic,
-                    serde_json::to_string(&subscribers)?,
-                );
+                let entry =
+                    KvEntry::new(TOPICS_CATEGORY, topic, serde_json::to_string(&subscribers)?);
                 if store.create_kv(entry).await? {
                     return Ok(Topic {
                         name: topic.to_owned(),

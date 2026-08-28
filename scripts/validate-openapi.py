@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 document = json.loads((ROOT / "service/static/openapi.json").read_text(encoding="utf-8"))
 source = (ROOT / "service/src/main.rs").read_text(encoding="utf-8")
-routes = set(re.findall(r'\.route\("([^"]+)"', source))
+routes = set(re.findall(r'\.route\(\s*"([^"]+)"', source))
 paths = set(document["paths"])
 assert routes == paths, {
     "missing_from_openapi": sorted(routes - paths),

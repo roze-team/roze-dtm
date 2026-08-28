@@ -24,6 +24,24 @@ Roze 的独立分布式事务协调器，默认提供 TCC，并支持 Saga 工�
 cargo test --workspace
 ```
 
+本地完整协议烟测使用独立 SQLite 内存配置启动真实 HTTP/gRPC 服务，并运行跨进程分支 mock：
+
+```bash
+ROZE_CONFIG_PATH=service/config.sqlite.smoke.yaml \
+ROZE_DTM_CONTROL_TOKEN='roze-dtm-smoke-token-32-bytes!!' \
+ROZE_DTM_RELEASE_REVISION=$(git rev-parse HEAD) \
+cargo run -p roze-dtm-service
+
+ROZE_DTM_CONTROL_TOKEN='roze-dtm-smoke-token-32-bytes!!' \
+node scripts/local-protocol-integration.mjs
+
+ROZE_DTM_GRPC_URL=http://127.0.0.1:36791 \
+ROZE_DTM_CONTROL_TOKEN='roze-dtm-smoke-token-32-bytes!!' \
+cargo run --example grpc_smoke
+```
+
+协议脚本覆盖 HTTP 的 TCC、Saga、Workflow、Message、XA，JSON-RPC Saga，受保护的管理查询/force-stop、Dashboard 审计、低基数指标，以及一次可恢复的 Message 503 分支失败。它仅供本机验收，示例令牌和内存 SQLite 配置不得用于部署。
+
 不启动 Rust 编译器时，可独立重建并核对 HTTP 合同：
 
 ```bash
@@ -70,7 +88,7 @@ ROZE_TEST_REDIS_CLUSTER_URLS=redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis
 cargo test redis_cluster_store_round_trip_against_real_service -- --ignored --nocapture
 ```
 
-CI 会启动 PostgreSQL 和 MySQL，并强制执行这两组测试。
+CI 会启动 PostgreSQL、MySQL、Redis standalone 和三节点 Redis Cluster，启用 PostgreSQL prepared transactions，并强制执行关系型存储、真实 XA Commit/Rollback/屏障/对账及两种 Redis 集成测试。
 
 ## 运行
 

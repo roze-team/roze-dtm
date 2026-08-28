@@ -448,7 +448,11 @@ impl TransactionStore for RedisTransactionStore {
                     .query_async(&mut connection),
             )
             .await?;
-        anyhow::ensure!(inserted == 1, "transaction already exists: {}", transaction.gid);
+        anyhow::ensure!(
+            inserted == 1,
+            "transaction already exists: {}",
+            transaction.gid
+        );
         Ok(())
     }
 
@@ -497,7 +501,8 @@ impl TransactionStore for RedisTransactionStore {
         transaction: Transaction,
         fence: &RecoveryLeaseFence,
     ) -> anyhow::Result<()> {
-        self.update_transaction_fenced_inner(transaction, fence).await
+        self.update_transaction_fenced_inner(transaction, fence)
+            .await
     }
 
     async fn register_branch(&self, gid: &str, branch: Branch) -> anyhow::Result<Transaction> {
@@ -538,12 +543,7 @@ impl TransactionStore for RedisTransactionStore {
         result: Option<String>,
     ) -> anyhow::Result<Transaction> {
         self.mutate_transaction(gid, "workflow completion", |transaction| {
-            apply_workflow_completion(
-                transaction,
-                status,
-                rollback_reason.clone(),
-                result.clone(),
-            )
+            apply_workflow_completion(transaction, status, rollback_reason.clone(), result.clone())
         })
         .await
     }
@@ -557,12 +557,7 @@ impl TransactionStore for RedisTransactionStore {
         fence: &RecoveryLeaseFence,
     ) -> anyhow::Result<Transaction> {
         self.mutate_transaction_fenced(gid, "workflow completion", fence, |transaction| {
-            apply_workflow_completion(
-                transaction,
-                status,
-                rollback_reason.clone(),
-                result.clone(),
-            )
+            apply_workflow_completion(transaction, status, rollback_reason.clone(), result.clone())
         })
         .await
     }
@@ -790,7 +785,11 @@ impl TransactionStore for RedisTransactionStore {
                 "barrier release",
                 redis::cmd("HDEL")
                     .arg(&self.keys.barriers)
-                    .arg(barrier_field(&barrier.gid, &barrier.branch_id, &barrier.op)?)
+                    .arg(barrier_field(
+                        &barrier.gid,
+                        &barrier.branch_id,
+                        &barrier.op,
+                    )?)
                     .query_async(&mut connection),
             )
             .await?;
@@ -811,7 +810,11 @@ impl TransactionStore for RedisTransactionStore {
                 redis::Script::new(FENCED_DELETE_HASH_FIELD)
                     .key(&self.keys.barriers)
                     .key(&self.keys.leases)
-                    .arg(barrier_field(&barrier.gid, &barrier.branch_id, &barrier.op)?)
+                    .arg(barrier_field(
+                        &barrier.gid,
+                        &barrier.branch_id,
+                        &barrier.op,
+                    )?)
                     .arg(owner_field)
                     .arg(expiry_field)
                     .arg(epoch_field)
@@ -899,11 +902,7 @@ pub fn validate_redis_namespace(namespace: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_recovery_lease_input(
-    name: &str,
-    owner: &str,
-    ttl_millis: u64,
-) -> anyhow::Result<()> {
+fn validate_recovery_lease_input(name: &str, owner: &str, ttl_millis: u64) -> anyhow::Result<()> {
     anyhow::ensure!(
         !name.is_empty() && name.len() <= 128,
         "invalid Redis recovery lease name"
@@ -1020,8 +1019,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires ROZE_TEST_REDIS_URL"]
     async fn redis_store_round_trip_against_real_service() {
-        let url = std::env::var("ROZE_TEST_REDIS_URL")
-            .expect("ROZE_TEST_REDIS_URL is required");
+        let url = std::env::var("ROZE_TEST_REDIS_URL").expect("ROZE_TEST_REDIS_URL is required");
         let namespace = test_namespace("test");
         let store = RedisTransactionStore::open(&url, &namespace).expect("open Redis store");
         store.health_check().await.expect("Redis health check");

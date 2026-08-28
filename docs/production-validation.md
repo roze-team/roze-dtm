@@ -28,19 +28,19 @@ bash scripts/redis-integration.sh
 - 普通控制面写入与恢复写入并发时，stale transaction revision 被拒绝且动态分支不会被静默覆盖。
 - Cluster MOVED/ASK、节点重启、主从切换、断连恢复及同槽脚本行为。
 
-当前状态：服务端时间 + epoch 租约、恢复 fenced store、事务 revision/payload CAS、Workflow/屏障 fenced Lua 和 ignored integration tests 已加入源码。受当前禁编译要求约束，本提交没有执行 Cargo 测试，也没有形成真实 Redis、主从切换或长时间运行证据，因此 Redis 后端仍不能据此宣称完成多节点生产验证，状态保持 `inconclusive`。
+当前状态：服务端时间 + epoch 租约、恢复 fenced store、事务 revision/payload CAS、Workflow/屏障 fenced Lua 和 ignored integration tests 已加入源码；workspace 编译、单元测试和 Clippy 已在本地通过。CI 会为每个提交启动 Redis standalone 与三节点 Cluster 并强制运行两组 ignored 集成测试。本机没有 Redis/Docker，因此当前修订的真实 Redis 结果以 CI 为准；MOVED/ASK、节点重启、主从切换、网络分区和长时间运行仍为 `inconclusive`。
 
 ## 协议互操作
 
 HTTP、JSON-RPC 和 gRPC 兼容协议需要使用固定上游客户端版本执行 TCC、Saga、XA、Message、Workflow 和 callback Workflow 端到端矩阵。callback 还必须覆盖 HTTP `409/425`、JSON-RPC `-32901/-32902`、gRPC `ABORTED/FAILED_PRECONDITION`、TLS、超时和客户端在 callback 内提交终态的并发竞争。
 
-当前状态：protobuf、OpenAPI 3.1、Rust/TypeScript/JavaScript 客户端合同和源码测试已存在；`python scripts/validate-compatibility.py` 静态固定 21 条兼容 HTTP/JSON-RPC 路由、9 个 gRPC 方法、proto 字段号、SDK 入口、上游查询 DTO 与 BSD 归属，OpenAPI 也已通过 Router 全覆盖检查及标准规范校验。该门禁不启动服务，不能证明序列化运行结果或真实客户端行为；Go/Rust/TypeScript/JavaScript 跨语言互操作仍未执行。
+当前状态：protobuf、OpenAPI 3.1、Rust/TypeScript/JavaScript 客户端合同和源码测试已存在；`python scripts/validate-compatibility.py` 静态固定 21 条兼容 HTTP/JSON-RPC 路由、9 个 gRPC 方法、proto 字段号、SDK 入口、上游查询 DTO 与 BSD 归属。真实 SQLite 服务已通过 HTTP 的五种事务模式、JSON-RPC Saga、受保护管理接口、Dashboard/指标检查和 Rust gRPC 客户端 smoke；可恢复 Message 503 分支失败也已验证。固定 dtm-labs Go/Node 客户端及 TypeScript/JavaScript SDK 的跨语言互操作、callback 错误矩阵和 TLS 仍未执行。
 
-并发 Saga 的源码合同覆盖依赖 DAG 校验、同层并发、后继等待和逆依赖补偿；HTTP 兼容层映射上游 `custom_data.concurrent/orders`。并发 Message 的源码合同覆盖同时投递、部分失败保留成功结果、仅重试失败分支，以及与延迟投递组合时到期前零调用；HTTP/JSON-RPC 兼容层映射上游请求顶层 `concurrent`。受当前禁编译要求约束，尚未执行这些 Rust 测试及真实分支故障注入，因此新增能力的运行证据仍为 `inconclusive`。
+并发 Saga 的源码合同覆盖依赖 DAG 校验、同层并发、后继等待和逆依赖补偿；HTTP 兼容层映射上游 `custom_data.concurrent/orders`。并发 Message 的源码合同覆盖同时投递、部分失败保留成功结果、仅重试失败分支，以及与延迟投递组合时到期前零调用；HTTP/JSON-RPC 兼容层映射上游请求顶层 `concurrent`。相关 Rust 测试已通过，单分支 503 后恢复重试已在真实服务 smoke 中通过；多进程并发、网络分区和重启故障注入仍为 `inconclusive`。
 
-延迟 Message 的源码合同覆盖提交决策先持久化、到期前零分支调用、绝对恢复时间和到期后正常投递；HTTP/JSON-RPC/gRPC 兼容请求共享 `custom_data.delay` 秒到毫秒映射。受当前禁编译要求约束，Rust 测试及真实重启跨越投递点的验证尚未执行，状态为 `inconclusive`。
+延迟 Message 的源码合同覆盖提交决策先持久化、到期前零分支调用、绝对恢复时间和到期后正常投递；HTTP/JSON-RPC/gRPC 兼容请求共享 `custom_data.delay` 秒到毫秒映射。Rust 测试已通过；真实重启跨越投递点的验证尚未执行，状态为 `inconclusive`。
 
-分支重试告警源码合同覆盖顺序/并发失败路径、阈值、超时、URL 查询串移除、配置 Debug 脱敏和告警失败不干扰事务恢复。生产验收仍需使用真实 HTTPS 接收端验证阈值前零调用、阈值后重复通知、非 2xx、超时、断连、服务重启与 payload/log/Dashboard 泄漏检查；当前禁编译窗口内未执行，状态为 `inconclusive`。
+分支重试告警源码合同覆盖顺序/并发失败路径、阈值、超时、URL 查询串移除、配置 Debug 脱敏和告警失败不干扰事务恢复，相关 Rust 测试已通过。生产验收仍需使用真实 HTTPS 接收端验证阈值前零调用、阈值后重复通知、非 2xx、超时、断连、服务重启与 payload/log/Dashboard 泄漏检查，状态为 `inconclusive`。
 
 `scripts/production-http-contract-smoke.mjs` 可对已运行的生产候选执行 12 项只读检查：三类探针、指标、OpenAPI、未授权拒绝、授权统计、Dashboard 脱敏、XA 对账、部署修订号、dtm-labs HTTP 和 JSON-RPC。运行必须绑定完整 Git revision 和显式部署拓扑；服务端 `/api/dtmsvr/version` 返回的 `release_revision` 必须与 `ROZE_DTM_EXPECTED_REVISION` 完全一致。脚本会将 OpenAPI/指标快照及检查结果写入证据目录。`scripts/validate-production-evidence.py` 独立校验时间范围、拓扑、判定一致性、检查项唯一性、相对工件路径、字节数与 SHA-256；通过烟测仍只证明该次短时 HTTP 合同，不替代数据库故障注入或 24h/72h soak。
 
@@ -50,7 +50,7 @@ HTTP、JSON-RPC 和 gRPC 兼容协议需要使用固定上游客户端版本执�
 
 MySQL 验证必须启用 InnoDB，并覆盖 XA START 之后、分支注册之后、XA PREPARE 之后和全局决策之后的进程中断；PostgreSQL 必须配置非零 `max_prepared_transactions` 并覆盖相同崩溃点。两种数据库都要验证 `roze_xa_barriers` 原子去重、重复 Commit/Rollback、`recover_prepared` 对账、注册失败回滚、网络超时重试、未知 XID，以及协调器追加的 `gid/trans_type/branch_id/op` 不可被 phase-2 URL 原查询参数覆盖。人工 Commit/Rollback 必须验证 `roze_xa_decisions` 的 intent-first 写入、decision id 幂等与冲突拒绝、失败后重试、终态复用、`reconcile` 双向差集，以及原因不进入日志、指标或 Dashboard。
 
-当前状态：MySQL/PostgreSQL 资源管理器、固定 XID 校验、屏障与启发式决策 DDL、intent-first 决策持久化、prepared transaction 双向对账、phase-2 参数覆盖和源码测试已加入。受当前禁编译要求约束，尚未执行编译、真实数据库或崩溃注入验证，因此状态为 `inconclusive`。
+当前状态：MySQL/PostgreSQL 资源管理器、固定 XID 校验、屏障与启发式决策 DDL、intent-first 决策持久化、prepared transaction 双向对账和 phase-2 参数覆盖已加入，并通过本地编译、单元测试与 Clippy。`tests/xa_backends.rs` 对两种真实数据库验证 Prepare、Commit、Rollback、屏障去重、prepared 扫描、启发式 decision id 幂等与对账；CI 启用 PostgreSQL prepared transactions 后强制运行。本机没有数据库服务，因此当前修订的真实 XA 结果以 CI 为准；进程崩溃点、网络超时和未知 XID 故障注入仍为 `inconclusive`。
 
 ## Dashboard
 
@@ -58,7 +58,7 @@ MySQL 验证必须启用 InnoDB，并覆盖 XA START 之后、分支注册之后
 
 不启动服务的合同检查使用 `python scripts/validate-dashboard.py` 与 `python scripts/validate-openapi.py`；前者验证静态页面唯一元素 id、无第三方资源、CSP、令牌不落浏览器存储及管理动作接线，后者递归验证全部 OpenAPI schema 引用并固定 Dashboard 行级动作枚举。它们不能替代真实 Bearer、状态变更和审计端到端验证。
 
-当前状态：Roze Admin 风格页面、脱敏快照、服务端动作声明、`reset-retry`/`force-stop` 二次确认、XA 人工对账指标、有界审计时间线和 `/v1/xa/reconciliation` 源码测试已加入；此前已用本地静态 HTTP 服务完成桌面/390px 窄屏浏览器渲染、连接失败反馈和控制台错误检查。受当前禁编译要求约束，本轮尚未执行真实 Roze 服务、受保护 Dashboard API、管理动作、暗色模式或端到端验证，因此状态保持 `inconclusive`。
+当前状态：Roze Admin 风格页面、脱敏快照、服务端动作声明、`reset-retry`/`force-stop` 二次确认、XA 人工对账指标、有界审计时间线和 `/v1/xa/reconciliation` 源码测试已加入。真实 SQLite Roze 服务已验证未授权拒绝、受保护 Dashboard 快照、force-stop、审计事件、指标存在及令牌不泄漏；此前还完成桌面/390px 窄屏静态浏览器渲染。暗色模式的真实服务浏览器端到端、持久审计 sink 和服务重启后的行为仍为 `inconclusive`。
 
 ## 生产证据要求
 

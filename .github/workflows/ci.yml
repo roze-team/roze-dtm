@@ -36,17 +36,66 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 30
+      redis:
+        image: redis:7.4
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
       ROZE_DTM_TEST_POSTGRES_URL: postgres://roze:roze-test@127.0.0.1:5432/roze_dtm
       ROZE_DTM_TEST_MYSQL_URL: mysql://roze:roze-test@127.0.0.1:3306/roze_dtm
+      ROZE_TEST_REDIS_URL: redis://127.0.0.1:6379
+      ROZE_TEST_REDIS_CLUSTER_URLS: redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: taiki-e/install-action@cargo-deny
+      - name: Enable PostgreSQL prepared transactions
+        run: |
+          container_id="$(docker ps --filter ancestor=postgres:16 --format '{{.ID}}')"
+          test -n "$container_id"
+          docker exec "$container_id" psql -U roze -d roze_dtm -c "ALTER SYSTEM SET max_prepared_transactions = 100"
+          docker restart "$container_id"
+          for attempt in $(seq 1 30); do
+            if docker exec "$container_id" pg_isready -U roze -d roze_dtm; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+      - name: Start Redis Cluster
+        run: |
+          for port in 7000 7001 7002; do
+            docker run --detach --name "roze-dtm-redis-$port" --network host redis:7.4 \
+              redis-server --port "$port" --cluster-enabled yes \
+              --cluster-config-file nodes.conf --cluster-node-timeout 5000 \
+              --appendonly no --protected-mode no
+          done
+          for attempt in $(seq 1 30); do
+            if docker run --rm --network host redis:7.4 redis-cli -p 7000 ping | grep -q PONG; then
+              break
+            fi
+            test "$attempt" -lt 30
+            sleep 1
+          done
+          docker run --rm --network host redis:7.4 redis-cli --cluster create \
+            127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 \
+            --cluster-replicas 0 --cluster-yes
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Dependency policy
+        run: cargo deny check
       - name: Test
         run: cargo test --workspace
+      - name: Redis integration
+        run: cargo test -p roze-dtm redis_store_round_trip_against_real_service -- --ignored --nocapture
+      - name: Redis Cluster integration
+        run: cargo test -p roze-dtm redis_cluster_store_round_trip_against_real_service -- --ignored --nocapture

@@ -74,10 +74,10 @@ for artifact in [
     assert (ROOT / artifact).is_file(), {"missing_artifact": artifact}
 
 for phrase in [
-    "静态迁移收口不等于完整目标已经通过验收",
     "Roze 原生替代，不作为未迁移缺口",
-    "当前唯一剩余门槛",
-    "cargo fmt --check",
+    "编译禁令解除后的验收进展",
+    "cargo fmt --all -- --check",
+    "真实依赖结果等待当前提交 CI",
     "24h/72h soak",
 ]:
     assert phrase in CLOSURE, {"missing_closure_statement": phrase}
