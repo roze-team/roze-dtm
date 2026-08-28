@@ -356,7 +356,7 @@ impl MySqlXaResourceManager {
     }
 
     pub async fn recover_prepared(&self) -> anyhow::Result<Vec<String>> {
-        let rows = sqlx::query("XA RECOVER").fetch_all(&self.pool).await?;
+        let rows = sqlx::raw_sql("XA RECOVER").fetch_all(&self.pool).await?;
         let mut resource_ids = Vec::with_capacity(rows.len());
         for row in rows {
             let data: Vec<u8> = row.try_get(3)?;
