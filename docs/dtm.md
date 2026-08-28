@@ -61,6 +61,7 @@ Authorization: Bearer <ROZE_DTM_CONTROL_TOKEN>
 - `POST /v1/workflows`、`/v1/workflows/{gid}/start|abort`：提交、执行或补偿 Workflow。
 - `POST /v1/messages`、`/v1/messages/{gid}/prepare|dispatch|abort`：二阶段消息生命周期。
 - `POST /v1/xa`、`/v1/xa/{gid}/prepare|commit|rollback`：XA 协调生命周期。
+- `GET /v1/xa/reconciliation`：返回脱敏的 XA 等待决策、phase-2 进行中和人工对账清单。
 - `GET /v1/transactions`：过滤并分页查询事务。
 - `GET /v1/transactions/{gid}`：查询单个事务。
 - `POST /v1/transactions/{gid}/recover`：强制推进一个可安全重放的状态。
@@ -130,7 +131,9 @@ Saga 端点只接受 `SagaAction` 分支，并要求补偿地址。
 
 `roze_dtm::xa::{MySqlXaResourceManager, PostgresXaResourceManager}` 面向业务数据库提供本地 XA 边界。全局事务先通过 `DtmHttpClient::prepare_xa` 创建；每个业务分支调用 `prepare_branch`，在一个独占连接内执行屏障、业务 SQL、`registerXaBranch` 和 Prepare；全局业务成功后调用 `commit_xa`，失败则调用 `rollback_xa`。业务 phase-2 路由根据协调器追加的 `gid`、`branch_id` 和 `op` 构造 `XaBranchDescriptor`，再调用资源管理器的 `resolve`。
 
-MySQL 使用 `XA START/END/PREPARE/COMMIT/ROLLBACK`，PostgreSQL 使用 `BEGIN/PREPARE TRANSACTION/COMMIT PREPARED/ROLLBACK PREPARED`。XID 只允许有界安全 ASCII，避免不能绑定参数的 XA 控制语句发生 SQL 注入；MySQL 的组合资源 ID 额外限制为 64 字节。`recover_prepared` 返回当前数据库仍处于 prepared 状态的资源 ID；重复 Commit/Rollback 映射为 `AlreadyResolved`。`roze_xa_barriers` 必须通过应用迁移或显式 schema 安装创建，PostgreSQL 必须配置非零 `max_prepared_transactions`。
+MySQL 使用 `XA START/END/PREPARE/COMMIT/ROLLBACK`，PostgreSQL 使用 `BEGIN/PREPARE TRANSACTION/COMMIT PREPARED/ROLLBACK PREPARED`。XID 只允许有界安全 ASCII，避免不能绑定参数的 XA 控制语句发生 SQL 注入；MySQL 的组合资源 ID 额外限制为 64 字节。`recover_prepared` 返回当前数据库仍处于 prepared 状态的资源 ID；重复 Commit/Rollback 映射为 `AlreadyResolved`。
+
+人工启发式处置必须通过资源管理器的 `resolve_heuristically`，使用 1–64 字节安全 decision id 和 1–512 字节原因。资源管理器先在业务数据库的 `roze_xa_decisions` 中幂等写入 `requested`，再执行 Commit/Rollback，最后落为 `applied`、`already_resolved` 或 `failed`；同一 decision id 的不同资源、决策或原因会被拒绝。`reconcile` 将该记录与数据库真实 prepared XID 比较。原因属于受保护运维数据，不进入日志、指标或 Dashboard。`roze_xa_barriers` 与 `roze_xa_decisions` 必须通过应用迁移或显式 schema 安装创建，PostgreSQL 必须配置非零 `max_prepared_transactions`。
 
 ## 输入边界
 
@@ -160,4 +163,4 @@ MySQL 使用 `XA START/END/PREPARE/COMMIT/ROLLBACK`，PostgreSQL 使用 `BEGIN/P
 
 ## 当前边界
 
-已支持内存、SQLite、PostgreSQL、MySQL 与 Redis 存储，Saga、TCC、静态及 callback Workflow、二阶段消息和 XA 协调状态机，MySQL/PostgreSQL XA 资源管理器，HTTP 分支调用、超时、重试、分支屏障、持久化恢复租约、版本化 KV、topic 订阅、自动恢复 worker、callback Workflow 的 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复、原生 Roze HTTP/gRPC 控制面、脱敏 Dashboard 和审计事件。Redis fencing、XA 启发式决策持久化、其他语言 SDK 与 Dashboard 审计时间线仍属于后续扩展；XA、Redis、gRPC 适配器及 callback 恢复仍需完成编译、真实依赖、跨语言互操作和故障注入验证。
+已支持内存、SQLite、PostgreSQL、MySQL 与 Redis 存储，Saga、TCC、静态及 callback Workflow、二阶段消息和 XA 协调状态机，MySQL/PostgreSQL XA 资源管理器、资源侧启发式决策持久化与 prepared 对账，HTTP 分支调用、超时、重试、分支屏障、持久化恢复租约、版本化 KV、topic 订阅、自动恢复 worker、callback Workflow 的 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复、原生 Roze HTTP/gRPC 控制面、脱敏 Dashboard 和审计事件。Redis fencing、其他语言 SDK 与 Dashboard 审计时间线仍属于后续扩展；XA、Redis、gRPC 适配器及 callback 恢复仍需完成编译、真实依赖、跨语言互操作和故障注入验证。

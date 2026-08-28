@@ -73,7 +73,7 @@ docker compose -f compose.redis.yaml up --build
 
 ## 管理 Dashboard
 
-浏览器访问 `http://127.0.0.1:8090/dashboard` 可打开只读事务 Dashboard。页面视觉与交互参考 Roze Admin 的 Workspace/Resource Page：工作区指标卡、紧凑筛选区、状态标签、事务进度和分页表格。页面通过 `GET /v1/dashboard` 获取脱敏快照，必须输入控制令牌；令牌只保存在当前页面内存，不写入 URL 或浏览器存储。
+浏览器访问 `http://127.0.0.1:8090/dashboard` 可打开只读事务 Dashboard。页面视觉与交互参考 Roze Admin 的 Workspace/Resource Page：工作区指标卡、紧凑筛选区、状态标签、事务进度、XA 人工对账计数和分页表格。页面通过 `GET /v1/dashboard` 获取脱敏快照，必须输入控制令牌；令牌只保存在当前页面内存，不写入 URL 或浏览器存储。`GET /v1/xa/reconciliation` 提供等待全局决策、phase-2 进行中和需要人工对账的 XA 安全摘要。
 
 Dashboard 数据不包含分支 URL、请求载荷、Header、metadata、Workflow 二进制数据或依赖错误，只返回 GID、类型、状态、分支计数、尝试次数和时间字段。`/dashboard` 只提供静态页面壳，受保护的数据接口仍应仅暴露在管理网络或服务网格内。
 
@@ -95,7 +95,7 @@ Dashboard 数据不包含分支 URL、请求载荷、Header、metadata、Workflo
 
 `roze_dtm::xa` 提供 MySQL 与 PostgreSQL 的 Rust 原生 XA 资源管理器。它在同一物理数据库连接中依次执行 XA/本地事务启动、`roze_xa_barriers` 幂等屏障、业务闭包、DTM 分支注册与 Prepare；注册或业务执行失败时失败闭合并回滚。二阶段接口提供 Commit/Rollback、重复 phase-2 的 `AlreadyResolved` 结果以及 prepared transaction 恢复扫描。`DtmHttpClient::xa_global_transaction` 对全局 Prepare、业务闭包和最终 Commit/Rollback 决策进行封装。
 
-应用必须先显式执行 `install_barrier_schema` 或将导出的 `MYSQL_XA_BARRIER_DDL` / `POSTGRES_XA_BARRIER_DDL` 纳入受控迁移。PostgreSQL 还必须配置非零 `max_prepared_transactions`。协调器调用 phase-2 URL 时会保留业务查询参数，并覆盖追加可信的 `gid`、`trans_type=xa`、`branch_id` 和 `op`。
+应用必须先显式执行 `install_barrier_schema`，或将导出的屏障与 `roze_xa_decisions` DDL 纳入受控迁移。`resolve_heuristically` 会先幂等持久化有界 decision id、Commit/Rollback 决策和人工原因，再执行 phase-2 并记录 `applied`、`already_resolved` 或 `failed`；`reconcile` 对照数据库 prepared XID 与待处理决策，列出无决策 prepared 资源和找不到 prepared 资源的决策。人工原因不会由库写入日志或 Dashboard。PostgreSQL 还必须配置非零 `max_prepared_transactions`。协调器调用 phase-2 URL 时会保留业务查询参数，并覆盖追加可信的 `gid`、`trans_type=xa`、`branch_id` 和 `op`。
 
 ## Rust 客户端
 

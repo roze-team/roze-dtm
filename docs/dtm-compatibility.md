@@ -48,7 +48,7 @@
 - Redis 存储复用 Roze standalone/Cluster 拓扑，事务复合更新、Workflow 进度/终态、KV、屏障和恢复租约均使用原子 Redis 操作，建连与命令统一受可配置超时限制；真实 Cluster、断连恢复和 fencing 证据尚待补齐。
 - JSON-RPC 始终返回 HTTP 200，并通过标准 `error.code` 表示协议或操作失败；语法错误返回 `-32700`，无效请求返回 `-32600`。
 - `forceStop` 是不可自动恢复的管理操作，只应在确认人工介入后使用。
-- XA phase-2 调用会保留业务查询参数，并覆盖追加可信的 `gid`、`trans_type=xa`、`branch_id` 与 `op`。Rust 客户端提供 XA Prepare/Commit/Rollback、分支注册，以及 MySQL/PostgreSQL 同连接本地 SQL、屏障、Prepare、幂等 phase-2 和 prepared transaction 扫描；仍需使用固定上游客户端和真实数据库完成互操作、崩溃恢复及启发式决策验证。
+- XA phase-2 调用会保留业务查询参数，并覆盖追加可信的 `gid`、`trans_type=xa`、`branch_id` 与 `op`。Rust 客户端提供 XA Prepare/Commit/Rollback、分支注册，以及 MySQL/PostgreSQL 同连接本地 SQL、屏障、Prepare、幂等 phase-2、intent-first 启发式决策记录和 prepared transaction 双向对账；仍需使用固定上游客户端和真实数据库完成互操作、崩溃恢复及启发式决策验证。
 
 第三方归属见 `THIRD_PARTY_NOTICES.md`。
 

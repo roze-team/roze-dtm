@@ -53,7 +53,7 @@
     .dot { width: 7px; height: 7px; border-radius: 50%; background: #a7b2c2; box-shadow: 0 0 0 4px rgb(167 178 194 / 10%); }
     .dot.ok { background: #22c55e; box-shadow: 0 0 0 4px rgb(34 197 94 / 10%); }
     .dot.error { background: var(--danger); box-shadow: 0 0 0 4px rgb(220 94 103 / 10%); }
-    .cards { display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr)); gap: 12px; margin-bottom: 16px; }
+    .cards { display: grid; grid-template-columns: repeat(7, minmax(120px, 1fr)); gap: 12px; margin-bottom: 16px; }
     .card, .panel { border: 1px solid var(--line); background: var(--panel); box-shadow: var(--shadow); }
     .card { position: relative; display: grid; min-width: 0; grid-template-columns: 42px minmax(0, 1fr); column-gap: 12px; padding: 16px; border-radius: 10px; transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease; }
     .card:hover { border-color: var(--line-strong); box-shadow: 0 8px 22px rgb(15 23 42 / 6%); transform: translateY(-1px); }
@@ -125,6 +125,7 @@
       <article class="card"><div class="metric-icon orange">↩</div><div class="label">已中止</div><div id="aborted" class="value">—</div></article>
       <article class="card"><div class="metric-icon rose">!</div><div class="label">失败</div><div id="failed" class="value">—</div></article>
       <article class="card"><div class="metric-icon orange">⏱</div><div class="label">等待重试</div><div id="retry_scheduled" class="value">—</div></article>
+      <article class="card"><div class="metric-icon rose">XA</div><div class="label">XA 人工对账</div><div id="xa_manual_reconciliation_required" class="value">—</div></article>
     </section>
 
     <section class="panel">
@@ -194,7 +195,7 @@
       }
 
       function render(snapshot) {
-        for (const key of ['total', 'active', 'succeeded', 'aborted', 'failed', 'retry_scheduled']) setText(key, number.format(snapshot.summary[key]));
+        for (const key of ['total', 'active', 'succeeded', 'aborted', 'failed', 'retry_scheduled', 'xa_manual_reconciliation_required']) setText(key, number.format(snapshot.summary[key]));
         const page = snapshot.transactions;
         state.total = page.total;
         state.offset = page.offset;

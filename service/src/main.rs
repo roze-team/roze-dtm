@@ -345,6 +345,9 @@ struct DashboardSummary {
     aborted: usize,
     failed: usize,
     retry_scheduled: usize,
+    xa_awaiting_decision: usize,
+    xa_phase2_in_progress: usize,
+    xa_manual_reconciliation_required: usize,
     by_kind: BTreeMap<String, usize>,
     by_status: BTreeMap<String, usize>,
 }
@@ -371,6 +374,28 @@ struct DashboardTransactionRow {
     updated_at_millis: u64,
     timeout_millis: Option<u64>,
     terminal: bool,
+    xa_reconciliation_state: Option<String>,
+}
+
+#[derive(Serialize)]
+struct XaReconciliationSnapshot {
+    generated_at_millis: u64,
+    awaiting_decision: usize,
+    phase2_in_progress: usize,
+    manual_reconciliation_required: usize,
+    items: Vec<XaReconciliationRow>,
+}
+
+#[derive(Serialize)]
+struct XaReconciliationRow {
+    gid: String,
+    status: String,
+    reconciliation_state: String,
+    branch_count: usize,
+    unresolved_branch_count: usize,
+    total_attempts: u64,
+    next_retry_millis: Option<u64>,
+    updated_at_millis: u64,
 }
 
 #[derive(Serialize)]
@@ -736,6 +761,7 @@ fn control_router(state: ControlState) -> Router {
         .route("/v1/xa/{gid}/prepare", post(prepare_xa))
         .route("/v1/xa/{gid}/commit", post(commit_xa))
         .route("/v1/xa/{gid}/rollback", post(rollback_xa))
+        .route("/v1/xa/reconciliation", get(xa_reconciliation))
         .route("/v1/transactions", get(list_transactions))
         .route("/v1/transactions/{gid}", get(get_transaction))
         .route("/v1/transactions/{gid}/recover", post(recover_transaction))
@@ -1778,6 +1804,91 @@ async fn dashboard_snapshot(
     }
 }
 
+async fn xa_reconciliation(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+) -> HttpResponse {
+    if !authorize(&state, &headers) {
+        return unauthorized_response();
+    }
+    match state.dtm.list().await {
+        Ok(transactions) => ok_response(build_xa_reconciliation(transactions)),
+        Err(error) => operation_error("dtm.xa.reconciliation.get", None, &error),
+    }
+}
+
+fn build_xa_reconciliation(transactions: Vec<Transaction>) -> XaReconciliationSnapshot {
+    let mut snapshot = XaReconciliationSnapshot {
+        generated_at_millis: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis() as u64),
+        awaiting_decision: 0,
+        phase2_in_progress: 0,
+        manual_reconciliation_required: 0,
+        items: Vec::new(),
+    };
+    for transaction in transactions {
+        let Some(state) = xa_reconciliation_state(&transaction) else {
+            continue;
+        };
+        match state {
+            "awaiting_decision" => snapshot.awaiting_decision += 1,
+            "phase2_in_progress" => snapshot.phase2_in_progress += 1,
+            "manual_reconciliation_required" => {
+                snapshot.manual_reconciliation_required += 1;
+            }
+            _ => {}
+        }
+        snapshot.items.push(XaReconciliationRow {
+            gid: transaction.gid,
+            status: status_name(transaction.status).to_owned(),
+            reconciliation_state: state.to_owned(),
+            branch_count: transaction.branches.len(),
+            unresolved_branch_count: transaction
+                .branches
+                .iter()
+                .filter(|branch| {
+                    !matches!(
+                        branch.status,
+                        BranchStatus::Succeeded | BranchStatus::Skipped
+                    )
+                })
+                .count(),
+            total_attempts: transaction
+                .branches
+                .iter()
+                .map(|branch| u64::from(branch.attempts))
+                .sum(),
+            next_retry_millis: transaction
+                .branches
+                .iter()
+                .filter_map(|branch| branch.next_retry_millis)
+                .min(),
+            updated_at_millis: transaction.updated_at_millis,
+        });
+    }
+    snapshot
+        .items
+        .sort_by(|left, right| right.updated_at_millis.cmp(&left.updated_at_millis));
+    snapshot
+}
+
+fn xa_reconciliation_state(transaction: &Transaction) -> Option<&'static str> {
+    if transaction.kind != TransactionKind::Xa {
+        return None;
+    }
+    match transaction.status {
+        TransactionStatus::Submitted | TransactionStatus::Prepared => Some("awaiting_decision"),
+        TransactionStatus::Succeeding | TransactionStatus::Aborting => {
+            Some("phase2_in_progress")
+        }
+        TransactionStatus::Failed => Some("manual_reconciliation_required"),
+        TransactionStatus::Trying
+        | TransactionStatus::Succeeded
+        | TransactionStatus::Aborted => None,
+    }
+}
+
 fn build_dashboard_snapshot(
     transactions: Vec<Transaction>,
     query: TransactionQuery,
@@ -1796,10 +1907,23 @@ fn build_dashboard_snapshot(
         aborted: 0,
         failed: 0,
         retry_scheduled: 0,
+        xa_awaiting_decision: 0,
+        xa_phase2_in_progress: 0,
+        xa_manual_reconciliation_required: 0,
         by_kind: BTreeMap::new(),
         by_status: BTreeMap::new(),
     };
     for transaction in &transactions {
+        if let Some(state) = xa_reconciliation_state(transaction) {
+            match state {
+                "awaiting_decision" => summary.xa_awaiting_decision += 1,
+                "phase2_in_progress" => summary.xa_phase2_in_progress += 1,
+                "manual_reconciliation_required" => {
+                    summary.xa_manual_reconciliation_required += 1;
+                }
+                _ => {}
+            }
+        }
         *summary
             .by_kind
             .entry(kind_name(transaction.kind).to_owned())
@@ -1887,6 +2011,7 @@ impl From<Transaction> for DashboardTransactionRow {
             .iter()
             .filter_map(|branch| branch.next_retry_millis)
             .min();
+        let xa_reconciliation_state = xa_reconciliation_state(&transaction).map(str::to_owned);
         Self {
             gid: transaction.gid,
             kind: kind_name(transaction.kind).to_owned(),
@@ -1900,6 +2025,7 @@ impl From<Transaction> for DashboardTransactionRow {
             updated_at_millis: transaction.updated_at_millis,
             timeout_millis: transaction.timeout_millis,
             terminal: transaction.status.is_terminal(),
+            xa_reconciliation_state,
         }
     }
 }
@@ -2542,6 +2668,39 @@ mod tests {
     }
 
     #[test]
+    fn xa_reconciliation_is_redacted_and_classifies_manual_work() {
+        let mut failed = Transaction::xa(
+            "xa-failed",
+            vec![Branch::xa(
+                "account",
+                "https://account.example.com/phase2?credential=secret",
+                "https://account.example.com/phase2?credential=secret",
+                serde_json::json!({"password": "secret"}),
+            )],
+        );
+        failed.status = TransactionStatus::Failed;
+        failed.branches[0].status = BranchStatus::Failed;
+        failed.branches[0].attempts = 4;
+        failed.branches[0].last_error = Some("database secret".to_owned());
+        let mut prepared = Transaction::xa("xa-prepared", Vec::new());
+        prepared.status = TransactionStatus::Prepared;
+
+        let snapshot = build_xa_reconciliation(vec![failed, prepared]);
+        assert_eq!(snapshot.awaiting_decision, 1);
+        assert_eq!(snapshot.manual_reconciliation_required, 1);
+        let failed = snapshot
+            .items
+            .iter()
+            .find(|item| item.gid == "xa-failed")
+            .expect("failed XA row");
+        assert_eq!(failed.unresolved_branch_count, 1);
+        let wire = serde_json::to_string(&snapshot).expect("serialize XA reconciliation");
+        assert!(!wire.contains("credential"));
+        assert!(!wire.contains("password"));
+        assert!(!wire.contains("database secret"));
+    }
+
+    #[test]
     fn dashboard_page_keeps_credentials_ephemeral() {
         let page = include_str!("../static/dashboard.html");
         assert!(page.contains("/v1/dashboard"));
@@ -2604,6 +2763,21 @@ mod tests {
             .unwrap();
         assert_eq!(unauthorized_dashboard.status(), StatusCode::UNAUTHORIZED);
 
+        let unauthorized_xa_reconciliation = router
+            .clone()
+            .oneshot(
+                http::Request::builder()
+                    .uri("/v1/xa/reconciliation")
+                    .body(rest::empty_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            unauthorized_xa_reconciliation.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
         let authorized_dashboard = router
             .clone()
             .oneshot(
@@ -2616,6 +2790,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authorized_dashboard.status(), StatusCode::OK);
+
+        let authorized_xa_reconciliation = router
+            .clone()
+            .oneshot(
+                http::Request::builder()
+                    .uri("/v1/xa/reconciliation")
+                    .header(AUTHORIZATION, format!("Bearer {token}"))
+                    .body(rest::empty_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authorized_xa_reconciliation.status(), StatusCode::OK);
 
         let authorized = router
             .oneshot(

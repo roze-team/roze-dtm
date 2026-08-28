@@ -36,15 +36,15 @@ HTTP、JSON-RPC 和 gRPC 兼容协议需要使用固定上游客户端版本执�
 
 ## XA Resource Manager
 
-MySQL 验证必须启用 InnoDB，并覆盖 XA START 之后、分支注册之后、XA PREPARE 之后和全局决策之后的进程中断；PostgreSQL 必须配置非零 `max_prepared_transactions` 并覆盖相同崩溃点。两种数据库都要验证 `roze_xa_barriers` 原子去重、重复 Commit/Rollback、`recover_prepared` 对账、注册失败回滚、网络超时重试、未知 XID，以及协调器追加的 `gid/trans_type/branch_id/op` 不可被 phase-2 URL 原查询参数覆盖。生产验收还必须记录人工 Commit/Rollback 启发式决策及其审计证据。
+MySQL 验证必须启用 InnoDB，并覆盖 XA START 之后、分支注册之后、XA PREPARE 之后和全局决策之后的进程中断；PostgreSQL 必须配置非零 `max_prepared_transactions` 并覆盖相同崩溃点。两种数据库都要验证 `roze_xa_barriers` 原子去重、重复 Commit/Rollback、`recover_prepared` 对账、注册失败回滚、网络超时重试、未知 XID，以及协调器追加的 `gid/trans_type/branch_id/op` 不可被 phase-2 URL 原查询参数覆盖。人工 Commit/Rollback 必须验证 `roze_xa_decisions` 的 intent-first 写入、decision id 幂等与冲突拒绝、失败后重试、终态复用、`reconcile` 双向差集，以及原因不进入日志、指标或 Dashboard。
 
-当前状态：MySQL/PostgreSQL 资源管理器、固定 XID 校验、屏障 DDL、prepared transaction 扫描、phase-2 参数覆盖和源码测试已加入。受当前禁编译要求约束，尚未执行编译、真实数据库或崩溃注入验证，启发式决策也尚未持久化，因此状态为 `inconclusive`。
+当前状态：MySQL/PostgreSQL 资源管理器、固定 XID 校验、屏障与启发式决策 DDL、intent-first 决策持久化、prepared transaction 双向对账、phase-2 参数覆盖和源码测试已加入。受当前禁编译要求约束，尚未执行编译、真实数据库或崩溃注入验证，因此状态为 `inconclusive`。
 
 ## Dashboard
 
 `GET /dashboard` 仅提供静态页面，`GET /v1/dashboard` 必须验证 Bearer 控制令牌。生产验收需要覆盖未授权拒绝、筛选与分页边界、空数据、各事务状态、窄屏和系统暗色模式，并检查浏览器网络响应中不存在分支 URL、payload、Header、metadata、Workflow 数据或依赖错误。控制令牌不得进入 URL、localStorage、sessionStorage、日志或表格 DOM。
 
-当前状态：页面和脱敏快照源码测试已加入，视觉与信息层级已按 `roze-admin` 的 Workspace/Resource Page 规范对齐；已用本地静态 HTTP 服务完成浏览器渲染和控制台错误检查。受当前禁编译要求约束，尚未执行真实 Roze 服务、受保护 API 或端到端验证，因此状态保持 `inconclusive`。
+当前状态：页面、脱敏快照、XA 人工对账指标和 `/v1/xa/reconciliation` 源码测试已加入，视觉与信息层级已按 `roze-admin` 的 Workspace/Resource Page 规范对齐；已用本地静态 HTTP 服务完成浏览器渲染和控制台错误检查。受当前禁编译要求约束，尚未执行真实 Roze 服务、受保护 API 或端到端验证，因此状态保持 `inconclusive`。
 
 ## 生产证据要求
 

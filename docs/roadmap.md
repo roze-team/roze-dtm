@@ -12,7 +12,7 @@
 | 高可用恢复 | 已支持 | 持久化租约保证同一时刻只有一个恢复 worker 推进事务 |
 | 控制面 | 已支持 | Roze HTTP、数字响应信封、鉴权、健康检查、指标与审计事件 |
 | DTM HTTP/JSON-RPC/gRPC 兼容 | 已支持核心 | 9 个 gRPC 方法、逐事务 timeout/retry/Header 及 WaitResult 异步调度；gRPC 互操作待补 |
-| XA | 部分支持 | 已有协调生命周期、动态分支、可信 phase-2 参数及 MySQL/PostgreSQL Rust 资源管理器；真实数据库崩溃恢复和启发式决策持久化待补 |
+| XA | 部分支持 | 已有协调生命周期、动态分支、可信 phase-2 参数、MySQL/PostgreSQL Rust 资源管理器、启发式决策记录与 prepared 对账；真实数据库崩溃恢复矩阵待补 |
 | 二阶段消息 | 已支持核心 | Prepared/Dispatch/Abort，并复用 `roze-transaction` Outbox/Inbox 与 `roze-mq` |
 | Topic/KV | 已支持核心 | 通用版本化 KV、订阅增删查、HTTP 兼容端点与 `topic://` 消息分支展开 |
 | Workflow DSL | 已支持核心 | 静态依赖图、恢复和逆序补偿；callback Workflow 支持复合进度、终态及 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复，互操作待验证 |
@@ -25,7 +25,7 @@
 1. 加固现有 TCC/Saga：并发状态推进、数据库故障测试、恢复 soak 与指标告警。
 2. 接入 Roze Outbox/Inbox 和二阶段消息，形成数据库写入到可靠事件发布闭环。
 3. 提供 Workflow DSL 与 Rust SDK，保持控制面协议可版本化。
-4. 完成 XA 真实数据库支持矩阵、崩溃点恢复、prepared transaction 对账和启发式决策持久化。
+4. 完成 XA 真实数据库支持矩阵、崩溃点恢复和资源侧启发式决策审计证据。
 5. 补齐 Redis 写入 fencing、真实 standalone/Cluster 故障证据、Dashboard 审计时间线与 Roze Admin 内嵌模块。
 
 任何标记为“已支持”的生产能力都必须同时具备契约文档、自动测试和可复现的运行入口。
