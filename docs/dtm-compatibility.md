@@ -32,6 +32,8 @@
 
 `all` 接受上游字段 `createTimeStart`、`createTimeEnd`（Unix 毫秒时间戳，边界包含），并以创建时间倒序、GID 倒序稳定分页。`position` 是上一页末项的唯一 GID，不应解析或自行构造；空字符串表示首页或没有下一页，无效游标及倒置时间范围会返回 `FAILURE`。`resetCronTime` 的 `timeout` 单位为秒，缺省值为 105 秒；它只重置恢复时间晚于“当前时间 + timeout”的事务，批次之外仍有匹配项时 `has_remaining=true`。
 
+并发 Saga 兼容上游 `custom_data`：`{"concurrent":true,"orders":{"2":[0,1]}}` 表示零基分支 2 必须在分支 0 和 1 成功后执行。Roze 将其转换为持久化分支 id 依赖图，按依赖就绪层并发执行，并按逆依赖层补偿。分支和依赖索引必须在范围内，且依赖必须位于当前分支之前；非法或成环图会失败闭合。
+
 ## TCC 调用顺序
 
 1. 客户端调用 `prepare` 创建空的 Prepared TCC。

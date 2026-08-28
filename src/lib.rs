@@ -238,6 +238,18 @@ impl Branch {
         }
     }
 
+    pub fn saga_with_dependencies(
+        id: impl Into<String>,
+        action: impl Into<String>,
+        compensate: impl Into<String>,
+        dependencies: Vec<String>,
+        payload: serde_json::Value,
+    ) -> Self {
+        let mut branch = Self::saga(id, action, compensate, payload);
+        branch.dependencies = dependencies;
+        branch
+    }
+
     pub fn tcc_try(
         id: impl Into<String>,
         try_action: impl Into<String>,
@@ -325,6 +337,12 @@ impl Transaction {
         Self::new(gid, TransactionKind::Saga, branches)
     }
 
+    pub fn concurrent_saga(gid: impl Into<String>, branches: Vec<Branch>) -> Self {
+        let mut transaction = Self::saga(gid, branches);
+        transaction.options.concurrent = true;
+        transaction
+    }
+
     pub fn tcc(gid: impl Into<String>, branches: Vec<Branch>) -> Self {
         Self::new(gid, TransactionKind::Tcc, branches)
     }
@@ -367,6 +385,13 @@ impl Transaction {
 pub struct TransactionOptions {
     #[serde(default)]
     pub wait_result: bool,
+    /// Enables dependency-aware concurrent execution for Saga branches.
+    ///
+    /// When false, Saga branches retain their declaration-order semantics and
+    /// must not declare dependencies. When true, every dependency names a
+    /// branch that must succeed before the dependent branch can run.
+    #[serde(default)]
+    pub concurrent: bool,
     #[serde(default)]
     pub retry_interval_millis: Option<u64>,
     #[serde(default)]
@@ -2962,6 +2987,7 @@ where
         // caller-supplied value to skip or saturate later compare-and-set writes.
         tx.revision = 1;
         tx.options.validate()?;
+        validate_saga_dependencies(&tx)?;
         if tx.kind == TransactionKind::Message {
             self.expand_message_topics(&mut tx).await?;
         }
@@ -3354,6 +3380,9 @@ where
             &tx,
             &[TransactionStatus::Submitted, TransactionStatus::Succeeding],
         )?;
+        if tx.options.concurrent {
+            return self.start_concurrent_saga(tx).await;
+        }
         let execution_options = tx.options.clone();
         let max_attempts = execution_options
             .retry_limit
@@ -3429,6 +3458,9 @@ where
                 TransactionStatus::Aborting,
             ],
         )?;
+        if tx.options.concurrent {
+            return self.abort_concurrent_saga(tx).await;
+        }
         let execution_options = tx.options.clone();
         tx.status = TransactionStatus::Aborting;
         for branch in tx.branches.iter_mut().rev() {
@@ -3477,6 +3509,270 @@ where
         tx.status = TransactionStatus::Aborted;
         self.persist_transaction(&mut tx).await?;
         Ok(tx)
+    }
+
+    async fn start_concurrent_saga(
+        &self,
+        mut tx: Transaction,
+    ) -> anyhow::Result<Transaction> {
+        validate_saga_dependencies(&tx)?;
+        let execution_options = tx.options.clone();
+        let max_attempts = execution_options
+            .retry_limit
+            .map(|retries| retries.saturating_add(1))
+            .unwrap_or(1);
+        tx.status = TransactionStatus::Succeeding;
+        self.persist_transaction(&mut tx).await?;
+
+        loop {
+            if tx
+                .branches
+                .iter()
+                .all(|branch| branch.status == BranchStatus::Succeeded)
+            {
+                tx.status = TransactionStatus::Succeeded;
+                self.persist_transaction(&mut tx).await?;
+                return Ok(tx);
+            }
+            let succeeded = tx
+                .branches
+                .iter()
+                .filter(|branch| branch.status == BranchStatus::Succeeded)
+                .map(|branch| branch.id.as_str())
+                .collect::<BTreeSet<_>>();
+            let ready = tx
+                .branches
+                .iter()
+                .enumerate()
+                .filter(|(_, branch)| {
+                    matches!(branch.status, BranchStatus::Pending | BranchStatus::Failed)
+                        && branch
+                            .dependencies
+                            .iter()
+                            .all(|dependency| succeeded.contains(dependency.as_str()))
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            if ready.is_empty() {
+                return Ok(tx);
+            }
+
+            let mut claimed = Vec::with_capacity(ready.len());
+            for &index in &ready {
+                let barrier = BranchBarrier::new(&tx.gid, &tx.branches[index].id, "action");
+                if self.store.barrier(barrier.clone()).await? != BarrierDecision::Execute {
+                    for barrier in claimed {
+                        self.store.release_barrier(&barrier).await?;
+                    }
+                    return self
+                        .store
+                        .get_transaction(&tx.gid)
+                        .await?
+                        .with_context(|| format!("transaction not found: {}", tx.gid));
+                }
+                claimed.push(barrier);
+            }
+            for &index in &ready {
+                tx.branches[index].status = BranchStatus::Running;
+                tx.branches[index].attempts = tx.branches[index].attempts.saturating_add(1);
+            }
+            self.persist_transaction(&mut tx).await?;
+
+            let mut tasks = tokio::task::JoinSet::new();
+            for index in ready {
+                let invoker = self.invoker.clone();
+                let options = execution_options.clone();
+                let mut branch = tx.branches[index].clone();
+                let action = branch.action.clone();
+                let retry_backoff_millis = options
+                    .retry_interval_millis
+                    .unwrap_or(self.options.retry_backoff_millis);
+                let max_retry_backoff_millis = self
+                    .options
+                    .max_retry_backoff_millis
+                    .max(retry_backoff_millis);
+                tasks.spawn(async move {
+                    let succeeded = invoker
+                        .invoke_with_options(&action, &branch.payload, &options)
+                        .await
+                        .is_ok();
+                    if succeeded {
+                        branch.status = BranchStatus::Succeeded;
+                        branch.next_retry_millis = None;
+                    } else {
+                        branch.status = BranchStatus::Failed;
+                        record_branch_failure(
+                            &mut branch,
+                            "branch_call_failed".to_owned(),
+                            retry_backoff_millis,
+                            max_retry_backoff_millis,
+                        );
+                    }
+                    (index, branch, succeeded)
+                });
+            }
+
+            let mut retryable_failure = false;
+            let mut exhausted_failure = false;
+            while let Some(result) = tasks.join_next().await {
+                let (index, branch, succeeded) =
+                    result.context("concurrent Saga action task failed")?;
+                tx.branches[index] = branch;
+                if !succeeded {
+                    let barrier =
+                        BranchBarrier::new(&tx.gid, &tx.branches[index].id, "action");
+                    self.store.release_barrier(&barrier).await?;
+                    if tx.branches[index].attempts < max_attempts {
+                        retryable_failure = true;
+                    } else {
+                        exhausted_failure = true;
+                    }
+                }
+            }
+
+            if exhausted_failure {
+                tx.status = TransactionStatus::Aborting;
+                for branch in &mut tx.branches {
+                    branch.status = if branch.status == BranchStatus::Succeeded {
+                        BranchStatus::Compensating
+                    } else {
+                        BranchStatus::Skipped
+                    };
+                    if branch.status == BranchStatus::Skipped {
+                        branch.next_retry_millis = None;
+                    }
+                }
+                self.persist_transaction(&mut tx).await?;
+                return self.abort_concurrent_saga(tx).await;
+            }
+            self.persist_transaction(&mut tx).await?;
+            if retryable_failure {
+                return Ok(tx);
+            }
+        }
+    }
+
+    async fn abort_concurrent_saga(
+        &self,
+        mut tx: Transaction,
+    ) -> anyhow::Result<Transaction> {
+        validate_saga_dependencies(&tx)?;
+        let execution_options = tx.options.clone();
+        tx.status = TransactionStatus::Aborting;
+        for branch in &mut tx.branches {
+            branch.status = match branch.status {
+                BranchStatus::Succeeded => BranchStatus::Compensating,
+                BranchStatus::Pending | BranchStatus::Running | BranchStatus::Failed => {
+                    branch.next_retry_millis = None;
+                    BranchStatus::Skipped
+                }
+                status => status,
+            };
+        }
+        self.persist_transaction(&mut tx).await?;
+
+        loop {
+            if tx
+                .branches
+                .iter()
+                .all(|branch| branch.status != BranchStatus::Compensating)
+            {
+                tx.status = TransactionStatus::Aborted;
+                self.persist_transaction(&mut tx).await?;
+                return Ok(tx);
+            }
+            let ready = tx
+                .branches
+                .iter()
+                .enumerate()
+                .filter(|(_, branch)| branch.status == BranchStatus::Compensating)
+                .filter(|(_, branch)| {
+                    !tx.branches.iter().any(|dependent| {
+                        dependent.dependencies.contains(&branch.id)
+                            && dependent.status == BranchStatus::Compensating
+                    })
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            anyhow::ensure!(
+                !ready.is_empty(),
+                "concurrent Saga {} has unresolved compensation dependencies",
+                tx.gid
+            );
+
+            let mut claimed = Vec::with_capacity(ready.len());
+            for &index in &ready {
+                let barrier =
+                    BranchBarrier::new(&tx.gid, &tx.branches[index].id, "compensate");
+                if self.store.barrier(barrier.clone()).await? != BarrierDecision::Execute {
+                    for barrier in claimed {
+                        self.store.release_barrier(&barrier).await?;
+                    }
+                    return self
+                        .store
+                        .get_transaction(&tx.gid)
+                        .await?
+                        .with_context(|| format!("transaction not found: {}", tx.gid));
+                }
+                claimed.push(barrier);
+                tx.branches[index].attempts = tx.branches[index].attempts.saturating_add(1);
+            }
+            self.persist_transaction(&mut tx).await?;
+
+            let mut tasks = tokio::task::JoinSet::new();
+            for index in ready {
+                let invoker = self.invoker.clone();
+                let options = execution_options.clone();
+                let mut branch = tx.branches[index].clone();
+                let compensate = branch
+                    .compensate
+                    .clone()
+                    .with_context(|| format!("missing Saga compensation URL for {}", branch.id))?;
+                let retry_backoff_millis = options
+                    .retry_interval_millis
+                    .unwrap_or(self.options.retry_backoff_millis);
+                let max_retry_backoff_millis = self
+                    .options
+                    .max_retry_backoff_millis
+                    .max(retry_backoff_millis);
+                tasks.spawn(async move {
+                    let succeeded = invoker
+                        .invoke_with_options(&compensate, &branch.payload, &options)
+                        .await
+                        .is_ok();
+                    if succeeded {
+                        branch.status = BranchStatus::Skipped;
+                        branch.next_retry_millis = None;
+                    } else {
+                        branch.status = BranchStatus::Compensating;
+                        record_branch_failure(
+                            &mut branch,
+                            "branch_call_failed".to_owned(),
+                            retry_backoff_millis,
+                            max_retry_backoff_millis,
+                        );
+                    }
+                    (index, branch, succeeded)
+                });
+            }
+
+            let mut failed = false;
+            while let Some(result) = tasks.join_next().await {
+                let (index, branch, succeeded) =
+                    result.context("concurrent Saga compensation task failed")?;
+                tx.branches[index] = branch;
+                if !succeeded {
+                    failed = true;
+                    let barrier =
+                        BranchBarrier::new(&tx.gid, &tx.branches[index].id, "compensate");
+                    self.store.release_barrier(&barrier).await?;
+                }
+            }
+            self.persist_transaction(&mut tx).await?;
+            if failed {
+                return Ok(tx);
+            }
+        }
     }
 
     pub async fn prepare_tcc(&self, gid: &str) -> anyhow::Result<Transaction> {
@@ -4345,6 +4641,104 @@ fn append_dynamic_branch(tx: &mut Transaction, branch: Branch) -> anyhow::Result
     Ok(())
 }
 
+/// Validates the execution DAG used by a concurrent Saga.
+pub fn validate_saga_dependencies(transaction: &Transaction) -> anyhow::Result<()> {
+    if transaction.kind != TransactionKind::Saga {
+        anyhow::ensure!(
+            !transaction.options.concurrent,
+            "options.concurrent is only supported for Saga transactions"
+        );
+        return Ok(());
+    }
+    if !transaction.options.concurrent {
+        anyhow::ensure!(
+            transaction
+                .branches
+                .iter()
+                .all(|branch| branch.dependencies.is_empty()),
+            "Saga dependencies require options.concurrent=true"
+        );
+        return Ok(());
+    }
+
+    let positions = transaction
+        .branches
+        .iter()
+        .enumerate()
+        .map(|(index, branch)| (branch.id.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    anyhow::ensure!(
+        positions.len() == transaction.branches.len(),
+        "concurrent Saga branch ids must be unique"
+    );
+    for branch in &transaction.branches {
+        let mut unique = BTreeSet::new();
+        for dependency in &branch.dependencies {
+            anyhow::ensure!(
+                dependency != &branch.id,
+                "concurrent Saga branch {} cannot depend on itself",
+                branch.id
+            );
+            anyhow::ensure!(
+                positions.contains_key(dependency.as_str()),
+                "concurrent Saga branch {} has unknown dependency {}",
+                branch.id,
+                dependency
+            );
+            anyhow::ensure!(
+                unique.insert(dependency),
+                "concurrent Saga branch {} repeats dependency {}",
+                branch.id,
+                dependency
+            );
+        }
+    }
+
+    fn visit(
+        index: usize,
+        branches: &[Branch],
+        positions: &BTreeMap<&str, usize>,
+        visiting: &mut BTreeSet<usize>,
+        visited: &mut BTreeSet<usize>,
+    ) -> anyhow::Result<()> {
+        if visited.contains(&index) {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            visiting.insert(index),
+            "concurrent Saga dependencies contain a cycle"
+        );
+        for dependency in &branches[index].dependencies {
+            let dependency_index = *positions
+                .get(dependency.as_str())
+                .expect("validated Saga dependency");
+            visit(
+                dependency_index,
+                branches,
+                positions,
+                visiting,
+                visited,
+            )?;
+        }
+        visiting.remove(&index);
+        visited.insert(index);
+        Ok(())
+    }
+
+    let mut visiting = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    for index in 0..transaction.branches.len() {
+        visit(
+            index,
+            &transaction.branches,
+            &positions,
+            &mut visiting,
+            &mut visited,
+        )?;
+    }
+    Ok(())
+}
+
 fn xa_phase2_callback_url(
     value: &str,
     gid: &str,
@@ -4854,6 +5248,14 @@ mod tests {
         calls: Arc<AtomicUsize>,
     }
 
+    #[derive(Clone, Default)]
+    struct ConcurrentSagaInvoker {
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+        events: Arc<Mutex<Vec<String>>>,
+        fail_url: Option<String>,
+    }
+
     #[async_trait]
     impl BranchInvoker for FailingOnceInvoker {
         async fn invoke(&self, _url: &str, _payload: &serde_json::Value) -> anyhow::Result<()> {
@@ -4920,6 +5322,28 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl BranchInvoker for ConcurrentSagaInvoker {
+        async fn invoke(&self, url: &str, _payload: &serde_json::Value) -> anyhow::Result<()> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            self.events
+                .lock()
+                .expect("concurrent Saga events lock")
+                .push(format!("start:{url}"));
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            self.events
+                .lock()
+                .expect("concurrent Saga events lock")
+                .push(format!("finish:{url}"));
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            if self.fail_url.as_deref() == Some(url) {
+                anyhow::bail!("injected concurrent Saga failure");
+            }
+            Ok(())
+        }
+    }
+
     #[tokio::test]
     async fn saga_can_submit_and_abort_with_compensation_barriers() {
         let dtm = Dtm::new(InMemoryTransactionStore::new());
@@ -4938,6 +5362,77 @@ mod tests {
 
         assert_eq!(aborted.status, TransactionStatus::Aborted);
         assert_eq!(aborted.branches[0].status, BranchStatus::Skipped);
+    }
+
+    #[test]
+    fn concurrent_saga_dependencies_must_be_known_and_acyclic() {
+        let mut transaction = Transaction::saga(
+            "gid-saga-graph",
+            vec![
+                Branch::saga("a", "action-a", "compensate-a", serde_json::json!({})),
+                Branch::saga("b", "action-b", "compensate-b", serde_json::json!({})),
+            ],
+        );
+        transaction.branches[1].dependencies = vec!["a".to_owned()];
+        assert!(validate_saga_dependencies(&transaction).is_err());
+
+        transaction.options.concurrent = true;
+        validate_saga_dependencies(&transaction).expect("valid concurrent Saga graph");
+        transaction.branches[0].dependencies = vec!["b".to_owned()];
+        assert!(validate_saga_dependencies(&transaction).is_err());
+        transaction.branches[0].dependencies = vec!["missing".to_owned()];
+        assert!(validate_saga_dependencies(&transaction).is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_saga_runs_ready_layers_and_compensates_reverse_dependencies() {
+        let invoker = ConcurrentSagaInvoker {
+            fail_url: Some("action-c".to_owned()),
+            ..ConcurrentSagaInvoker::default()
+        };
+        let max_active = Arc::clone(&invoker.max_active);
+        let events = Arc::clone(&invoker.events);
+        let dtm = Dtm::with_invoker(InMemoryTransactionStore::new(), invoker);
+        let mut transaction = Transaction::saga(
+            "gid-saga-concurrent",
+            vec![
+                Branch::saga("a", "action-a", "compensate-a", serde_json::json!({})),
+                Branch::saga("b", "action-b", "compensate-b", serde_json::json!({})),
+                Branch::saga("c", "action-c", "compensate-c", serde_json::json!({})),
+            ],
+        );
+        transaction.options.concurrent = true;
+        transaction.branches[2].dependencies = vec!["a".to_owned(), "b".to_owned()];
+        dtm.submit(transaction).await.expect("submit concurrent Saga");
+
+        let aborted = dtm
+            .start_saga("gid-saga-concurrent")
+            .await
+            .expect("run concurrent Saga");
+        assert_eq!(aborted.status, TransactionStatus::Aborted);
+        assert!(aborted
+            .branches
+            .iter()
+            .all(|branch| branch.status == BranchStatus::Skipped));
+        assert_eq!(max_active.load(Ordering::SeqCst), 2);
+
+        let events = events.lock().expect("concurrent Saga events lock");
+        let start_c = events
+            .iter()
+            .position(|event| event == "start:action-c")
+            .expect("start action c");
+        let finish_a = events
+            .iter()
+            .position(|event| event == "finish:action-a")
+            .expect("finish action a");
+        let finish_b = events
+            .iter()
+            .position(|event| event == "finish:action-b")
+            .expect("finish action b");
+        assert!(start_c > finish_a && start_c > finish_b);
+        assert!(events.iter().any(|event| event == "start:compensate-a"));
+        assert!(events.iter().any(|event| event == "start:compensate-b"));
+        assert!(!events.iter().any(|event| event == "start:compensate-c"));
     }
 
     #[tokio::test]

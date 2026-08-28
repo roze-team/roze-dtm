@@ -115,19 +115,29 @@ Dashboard API 使用同一组过滤和分页边界，但只返回管理摘要字
 ```json
 {
   "gid": "transfer-1001",
+  "options": { "concurrent": true },
   "branches": [
     {
       "id": "out",
       "kind": "SagaAction",
       "action": "http://account/trans-out",
       "compensate": "http://account/trans-out-compensate",
-      "payload": { "amount": 30 }
+      "payload": { "amount": 30 },
+      "dependencies": []
+    },
+    {
+      "id": "in",
+      "kind": "SagaAction",
+      "action": "http://account/trans-in",
+      "compensate": "http://account/trans-in-compensate",
+      "payload": { "amount": 30 },
+      "dependencies": ["out"]
     }
   ]
 }
 ```
 
-Saga 端点只接受 `SagaAction` 分支，并要求补偿地址。
+Saga 端点只接受 `SagaAction` 分支，并要求补偿地址。默认按声明顺序执行且不接受依赖；设置 `options.concurrent: true` 后，`dependencies` 构成有向无环图，所有依赖已经成功的分支在同一层并发执行。失败时只补偿成功分支，并按反向依赖层并发补偿，保证依赖方先于其前置分支回滚。依赖必须引用同一事务中的唯一分支 id；未知、重复、自依赖和环都会在事务写入前拒绝。
 
 ## XA 资源管理器
 
@@ -153,7 +163,7 @@ MySQL 使用 `XA START/END/PREPARE/COMMIT/ROLLBACK`，PostgreSQL 使用 `BEGIN/P
 
 - TCC：`Submitted -> Prepared` 后等待显式 Submit；提交决定先持久化为 `Succeeding`，再推进 Confirm 至 `Succeeded`，超时/Aborting 后 Cancel。
 - XA 与二阶段消息同样不会由恢复 worker 将 `Prepared` 猜测为提交决定；只有显式 Submit/Commit 持久化 `Succeeding` 后才执行 phase-2。
-- Saga：`Submitted -> Succeeded`，或超时/Aborting 后补偿。
+- Saga：`Submitted -> Succeeded`，或超时/Aborting 后补偿；并发 Saga 按依赖就绪层推进，补偿按逆依赖层推进。
 - 终态事务原样返回。
 - `Trying`、`Succeeding` 等无法安全整体重放的状态拒绝手工强推，避免重复调用分支。
 
@@ -165,4 +175,4 @@ MySQL 使用 `XA START/END/PREPARE/COMMIT/ROLLBACK`，PostgreSQL 使用 `BEGIN/P
 
 ## 当前边界
 
-已支持内存、SQLite、PostgreSQL、MySQL 与 Redis 存储，Saga、TCC、静态及 callback Workflow、二阶段消息和 XA 协调状态机，MySQL/PostgreSQL XA 资源管理器、资源侧启发式决策持久化与 prepared 对账，HTTP 分支调用、超时、重试、分支屏障、持久化恢复租约、Redis 恢复写入 fencing、版本化 KV、topic 订阅、自动恢复 worker、callback Workflow 的 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复、原生 Roze HTTP/gRPC 控制面、Roze Admin 风格脱敏 Dashboard、有界审计时间线和审计事件、完整 OpenAPI 3.1 合同，以及 TypeScript/JavaScript 原生与 dtm-labs HTTP/JSON-RPC 兼容 SDK。Roze Admin 内嵌模块仍属于后续扩展；XA、Redis、gRPC 适配器及 callback 恢复仍需完成编译、真实依赖、跨语言互操作和故障注入验证。
+已支持内存、SQLite、PostgreSQL、MySQL 与 Redis 存储，顺序及依赖 DAG 并发 Saga、TCC、静态及 callback Workflow、二阶段消息和 XA 协调状态机，MySQL/PostgreSQL XA 资源管理器、资源侧启发式决策持久化与 prepared 对账，HTTP 分支调用、超时、重试、分支屏障、持久化恢复租约、Redis 恢复写入 fencing、版本化 KV、topic 订阅、自动恢复 worker、callback Workflow 的 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复、原生 Roze HTTP/gRPC 控制面、Roze Admin 风格脱敏 Dashboard、有界审计时间线和审计事件、完整 OpenAPI 3.1 合同，以及 TypeScript/JavaScript 原生与 dtm-labs HTTP/JSON-RPC 兼容 SDK。Roze Admin 内嵌模块仍属于后续扩展；并发 Saga、XA、Redis、gRPC 适配器及 callback 恢复仍需完成编译、真实依赖、跨语言互操作和故障注入验证。

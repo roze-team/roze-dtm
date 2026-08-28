@@ -63,6 +63,7 @@ schemas = {
         "type": "object",
         "properties": {
             "wait_result": {"type": "boolean", "default": False},
+            "concurrent": {"type": "boolean", "default": False, "description": "Run Saga branches by dependency-ready concurrent layers"},
             "retry_interval_millis": nullable_u64,
             "request_timeout_millis": nullable_u64,
             "retry_limit": nullable_u64,
@@ -126,7 +127,8 @@ schemas = {
     "CompatTransactionRequest": {"type": "object", "required": ["gid", "trans_type"], "properties": {
         "gid": {"type": "string"}, "trans_type": {"type": "string", "enum": ["tcc", "saga", "workflow", "msg", "message", "xa"]},
         "steps": {"type": "array", "items": string_map}, "payloads": {"type": "array", "items": ref("JsonValue")},
-        "timeout_to_fail": nullable_u64, "rollback_reason": nullable_string, "custom_data": nullable_string,
+        "timeout_to_fail": nullable_u64, "rollback_reason": nullable_string,
+        "custom_data": {**nullable_string, "description": "Opaque upstream data; Saga concurrent/orders objects map to the execution DAG"},
         "query_prepared": nullable_string, "wait_result": {"type": "boolean"}, "retry_interval": nullable_u64,
         "request_timeout": nullable_u64, "retry_limit": nullable_u64, "branch_headers": string_map, "req_extra": string_map,
     }},

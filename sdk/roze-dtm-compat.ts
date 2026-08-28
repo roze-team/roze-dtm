@@ -28,6 +28,17 @@ export interface CompatWorkflowSnapshot {
 export interface JsonRpcErrorBody { code: number; message: string }
 export type JsonRpcResponse<T> = { jsonrpc: "2.0"; id: JsonValue; result: T } | { jsonrpc: "2.0"; id: JsonValue; error: JsonRpcErrorBody };
 
+export function concurrentSagaCustomData(orders: Record<number, number[]> = {}): string {
+  for (const [branch, dependencies] of Object.entries(orders)) {
+    const branchIndex = Number(branch);
+    if (!Number.isInteger(branchIndex) || branchIndex < 0 || !Array.isArray(dependencies)
+      || dependencies.some((dependency) => !Number.isInteger(dependency) || dependency < 0 || dependency >= branchIndex)) {
+      throw new TypeError("Saga orders require non-negative branch indexes and preceding dependency indexes");
+    }
+  }
+  return JSON.stringify({ orders, concurrent: true });
+}
+
 export class RozeDtmJsonRpcError extends Error {
   constructor(public readonly code: number, message: string, public readonly id: JsonValue) { super(message); this.name = "RozeDtmJsonRpcError"; }
 }

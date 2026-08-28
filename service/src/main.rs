@@ -13,11 +13,11 @@ use anyhow::Context as _;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use roze_dtm::{
-    validate_redis_namespace, Branch, BranchKind, BranchStatus, BranchUrlPolicy, Dtm, DtmOptions,
-    HttpBranchInvoker, InMemoryTransactionStore, MySqlTransactionStore,
-    PostgresTransactionStore, RedisTransactionStore, SqliteTransactionStore, Transaction,
-    TransactionKind, TransactionOptions, TransactionStatus, TransactionStore, WorkflowProgress,
-    WorkflowProgressStatus,
+    validate_redis_namespace, validate_saga_dependencies, Branch, BranchKind, BranchStatus,
+    BranchUrlPolicy, Dtm, DtmOptions, HttpBranchInvoker, InMemoryTransactionStore,
+    MySqlTransactionStore, PostgresTransactionStore, RedisTransactionStore,
+    SqliteTransactionStore, Transaction, TransactionKind, TransactionOptions, TransactionStatus,
+    TransactionStore, WorkflowProgress, WorkflowProgressStatus,
 };
 use roze_http::{
     rest::{self, HttpResponse, RestServer, RestService},
@@ -553,6 +553,13 @@ struct CompatTransactionRequest {
     req_extra: BTreeMap<String, String>,
     #[serde(skip)]
     protocol: CompatProtocol,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct CompatSagaCustom {
+    concurrent: bool,
+    orders: BTreeMap<usize, Vec<usize>>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -1738,7 +1745,52 @@ fn compat_transaction(
         TransactionKind::Message => Transaction::message(&request.gid, branches),
     };
     transaction.options = compat_transaction_options(request)?;
+    if kind == TransactionKind::Saga {
+        apply_compat_saga_custom(&mut transaction, request)?;
+    }
     Ok(transaction)
+}
+
+fn apply_compat_saga_custom(
+    transaction: &mut Transaction,
+    request: &CompatTransactionRequest,
+) -> anyhow::Result<()> {
+    let Some(custom_data) = request
+        .custom_data
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(custom_data) else {
+        return Ok(());
+    };
+    if value.get("concurrent").is_none() && value.get("orders").is_none() {
+        return Ok(());
+    }
+    let custom: CompatSagaCustom = serde_json::from_value(value)
+        .context("Saga custom_data must contain valid concurrent options")?;
+    anyhow::ensure!(
+        custom.concurrent || custom.orders.is_empty(),
+        "Saga orders require concurrent=true"
+    );
+    transaction.options.concurrent = custom.concurrent;
+    for (branch_index, dependencies) in custom.orders {
+        anyhow::ensure!(
+            branch_index < transaction.branches.len(),
+            "Saga order branch index is out of range"
+        );
+        let mut resolved = Vec::with_capacity(dependencies.len());
+        for dependency_index in dependencies {
+            anyhow::ensure!(
+                dependency_index < branch_index,
+                "Saga order dependencies must precede their branch"
+            );
+            resolved.push(transaction.branches[dependency_index].id.clone());
+        }
+        transaction.branches[branch_index].dependencies = resolved;
+    }
+    Ok(())
 }
 
 fn compat_transaction_options(
@@ -1746,6 +1798,7 @@ fn compat_transaction_options(
 ) -> anyhow::Result<TransactionOptions> {
     let options = TransactionOptions {
         wait_result: request.wait_result,
+        concurrent: false,
         retry_interval_millis: request
             .retry_interval
             .map(|seconds| seconds.saturating_mul(1_000)),
@@ -2343,12 +2396,14 @@ fn build_transaction(
                 if compensate.is_none() {
                     return Err("Saga branches require a valid compensate URL");
                 }
-                Branch::saga(
+                let mut saga = Branch::saga(
                     branch.id,
                     branch.action,
                     compensate.expect("validated compensate URL"),
                     branch.payload,
-                )
+                );
+                saga.dependencies = branch.dependencies;
+                saga
             }
             TransactionKind::Workflow => {
                 let compensate = branch
@@ -2386,6 +2441,9 @@ fn build_transaction(
         return Err("transaction options are invalid");
     }
     transaction.options = request.options;
+    if validate_saga_dependencies(&transaction).is_err() {
+        return Err("concurrent options or Saga dependencies are invalid");
+    }
     if let Some(timeout) = request.timeout_millis {
         if !(1_000..=86_400_000).contains(&timeout) {
             return Err("timeout_millis must be between 1000 and 86400000");
@@ -2854,6 +2912,43 @@ mod tests {
             options: TransactionOptions::default(),
         };
         assert!(build_transaction(TransactionKind::Message, topic_message, &policy).is_ok());
+    }
+
+    #[test]
+    fn compat_saga_custom_data_maps_concurrent_branch_orders() {
+        let request = CompatTransactionRequest {
+            gid: "saga-concurrent".to_owned(),
+            trans_type: "saga".to_owned(),
+            steps: (0..3)
+                .map(|index| {
+                    [
+                        ("action".to_owned(), format!("http://inventory/action-{index}")),
+                        (
+                            "compensate".to_owned(),
+                            format!("http://inventory/compensate-{index}"),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect()
+                })
+                .collect(),
+            payloads: vec![serde_json::json!({}); 3],
+            custom_data: Some(r#"{"concurrent":true,"orders":{"2":[0,1]}}"#.to_owned()),
+            ..CompatTransactionRequest::default()
+        };
+        let policy = BranchUrlPolicy::from_allowed_origins(["http://inventory"])
+            .expect("branch policy");
+        let transaction = compat_transaction(TransactionKind::Saga, &request, &policy)
+            .expect("concurrent Saga compatibility request");
+
+        assert!(transaction.options.concurrent);
+        assert!(transaction.branches[0].dependencies.is_empty());
+        assert!(transaction.branches[1].dependencies.is_empty());
+        assert_eq!(
+            transaction.branches[2].dependencies,
+            vec!["01".to_owned(), "02".to_owned()]
+        );
+        validate_saga_dependencies(&transaction).expect("valid mapped Saga graph");
     }
 
     #[test]

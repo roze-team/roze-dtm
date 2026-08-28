@@ -1888,6 +1888,11 @@
             "type": "boolean",
             "default": false
           },
+          "concurrent": {
+            "type": "boolean",
+            "default": false,
+            "description": "Run Saga branches by dependency-ready concurrent layers"
+          },
           "retry_interval_millis": {
             "type": [
               "integer",
@@ -2327,7 +2332,8 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Opaque upstream data; Saga concurrent/orders objects map to the execution DAG"
           },
           "query_prepared": {
             "type": [

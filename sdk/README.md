@@ -8,12 +8,11 @@ import { RozeDtmClient } from "./roze-dtm.js";
 const dtm = new RozeDtmClient("https://dtm.example.com", process.env.DTM_TOKEN);
 const transaction = await dtm.submitSaga({
   gid: "order-20260828",
-  branches: [{
-    id: "reserve",
-    action: "https://inventory.example.com/reserve",
-    compensate: "https://inventory.example.com/release",
-    payload: { sku: "A-1", quantity: 1 },
-  }],
+  options: { concurrent: true },
+  branches: [
+    { id: "reserve", action: "https://inventory.example.com/reserve", compensate: "https://inventory.example.com/release", payload: { sku: "A-1", quantity: 1 } },
+    { id: "charge", action: "https://payment.example.com/charge", compensate: "https://payment.example.com/refund", dependencies: ["reserve"], payload: { amount: 30 } },
+  ],
 });
 ```
 
@@ -24,9 +23,20 @@ const transaction = await dtm.submitSaga({
 `roze-dtm-compat.ts` 和 `roze-dtm-compat.js` 覆盖 `/api/dtmsvr/**` 的版本、GID、事务操作、动态分支、callback Workflow、查询分页、恢复管理、topic/KV，以及 `/api/json-rpc` 的五个方法。`version()` 同时返回包版本和可空的部署 Git revision。客户端按上游原始 `dtm_result` 或 JSON-RPC 2.0 合同处理响应，不会将其误当作 Roze envelope。
 
 ```ts
-import { RozeDtmCompatClient } from "./roze-dtm-compat.js";
+import { concurrentSagaCustomData, RozeDtmCompatClient } from "./roze-dtm-compat.js";
 
 const compat = new RozeDtmCompatClient("https://dtm.example.com", process.env.DTM_TOKEN);
 const { gid } = await compat.newGid();
 await compat.prepare({ gid, trans_type: "tcc" });
+
+await compat.submit({
+  gid: "saga-concurrent",
+  trans_type: "saga",
+  steps: [
+    { action: "https://inventory.example.com/reserve", compensate: "https://inventory.example.com/release" },
+    { action: "https://payment.example.com/charge", compensate: "https://payment.example.com/refund" },
+  ],
+  payloads: [{}, {}],
+  custom_data: concurrentSagaCustomData({ 1: [0] }),
+});
 ```

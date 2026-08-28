@@ -6,6 +6,7 @@ export type BranchStatus = "Pending" | "Running" | "Compensating" | "Succeeded" 
 
 export interface TransactionOptions {
   wait_result?: boolean;
+  concurrent?: boolean;
   retry_interval_millis?: number | null;
   request_timeout_millis?: number | null;
   retry_limit?: number | null;

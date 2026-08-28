@@ -1,5 +1,16 @@
 import { RozeDtmApiError } from "./roze-dtm.js";
 
+export function concurrentSagaCustomData(orders = {}) {
+  for (const [branch, dependencies] of Object.entries(orders)) {
+    const branchIndex = Number(branch);
+    if (!Number.isInteger(branchIndex) || branchIndex < 0 || !Array.isArray(dependencies)
+      || dependencies.some((dependency) => !Number.isInteger(dependency) || dependency < 0 || dependency >= branchIndex)) {
+      throw new TypeError("Saga orders require non-negative branch indexes and preceding dependency indexes");
+    }
+  }
+  return JSON.stringify({ orders, concurrent: true });
+}
+
 export class RozeDtmJsonRpcError extends Error {
   constructor(code, message, id) { super(message); this.name = "RozeDtmJsonRpcError"; this.code = code; this.id = id; }
 }

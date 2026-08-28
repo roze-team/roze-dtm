@@ -41,7 +41,7 @@ rpc:
 
 普通事务的二进制 payload 会优先按 JSON 解码；无法解码时保留为 JSON 字节数组。当前 HTTP 分支调用器发送 JSON，因此需要原始 protobuf 二进制业务载荷的普通分支应在业务适配层显式编码。callback Workflow 进度使用独立的 `WorkflowProgress`，gRPC `BusiPayload/BinData` 会原样往返，不经过 JSON 转换。
 
-`CustomedData`、`QueryPrepared` 和 `ReqExtra` 会保存在事务 metadata 中，避免跨协议转换时丢失。`RetryInterval`、`RequestTimeout` 按上游合同以秒接收并转换为毫秒，`RetryLimit` 和 `BranchHeaders` 进入持久化 `TransactionOptions`：HTTP 分支调用会应用逐事务 timeout 和 Header，失败恢复使用逐事务初始退避，Saga 在重试次数耗尽后进入补偿。`WaitResult=false` 时，Submit/Abort 在完成状态校验和持久化调度后立即返回，实际分支调用由带租约的恢复 worker 推进；`WaitResult=true` 保持同步等待。Prepare 始终同步完成持久化阶段。
+`CustomedData`、`QueryPrepared` 和 `ReqExtra` 会保存在事务 metadata 中，避免跨协议转换时丢失。Saga 的 `CustomedData` 若包含上游 `{"concurrent":true,"orders":...}` 合同，还会转换为持久化分支依赖 DAG。`RetryInterval`、`RequestTimeout` 按上游合同以秒接收并转换为毫秒，`RetryLimit` 和 `BranchHeaders` 进入持久化 `TransactionOptions`：HTTP 分支调用会应用逐事务 timeout 和 Header，失败恢复使用逐事务初始退避，Saga 在重试次数耗尽后进入补偿。`WaitResult=false` 时，Submit/Abort 在完成状态校验和持久化调度后立即返回，实际分支调用由带租约的恢复 worker 推进；`WaitResult=true` 保持同步等待。Prepare 始终同步完成持久化阶段。
 
 ## Callback Workflow
 

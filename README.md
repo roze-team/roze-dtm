@@ -4,7 +4,7 @@ Roze 的独立分布式事务协调器，默认提供 TCC，并支持 Saga 工�
 
 ## 项目结构
 
-- `src/lib.rs`：DTM 核心库，包含 TCC、Saga、Workflow、二阶段消息与 XA 状态机，以及内存、SQLite、PostgreSQL、MySQL、Redis 存储、HTTP 分支调用和恢复逻辑。
+- `src/lib.rs`：DTM 核心库，包含 TCC、顺序/并发 DAG Saga、Workflow、二阶段消息与 XA 状态机，以及内存、SQLite、PostgreSQL、MySQL、Redis 存储、HTTP 分支调用和恢复逻辑。
 - `src/xa.rs`：MySQL/PostgreSQL XA 业务资源管理器、屏障、prepared transaction 扫描与幂等 phase-2。
 - `service/`：独立控制面服务。
 - `service/static/openapi.json`：覆盖原生、兼容、管理与运维端点的 OpenAPI 3.1 合同。
@@ -115,6 +115,8 @@ Dashboard 数据不包含分支 URL、请求载荷、Header、metadata、Workflo
 所有关系型后端会在启动时幂等创建事务、分支屏障和恢复租约表。连接由 Roze `roze-sqlx` 管理，可通过 `max_connections` 设置连接池上限。Redis 配置使用 `redis_url` 或 `redis_cluster_urls`，并要求安全的 `redis_namespace`；`redis_operation_timeout_ms`（默认 5000）同时限制建连和每次命令。所有数据 key 共享显式 Cluster hash tag；普通 CAS/屏障脚本访问单 key，恢复写入脚本在同一槽内原子访问事务或屏障 Hash 与租约 Hash。
 
 动态分支注册由存储层原子执行：内存后端使用写锁，PostgreSQL/MySQL 使用行锁，SQLite 和 Redis 使用带冲突重试的比较更新，避免多实例并发注册互相覆盖。事务载荷包含向后兼容的单调 `revision`；旧记录缺失该字段时从 0 开始，后续成功变更递增。Redis 普通状态推进拒绝 stale revision，恢复推进还要求 owner、epoch 和 Redis 服务端过期时间同时匹配。五种后端也提供版本化通用 KV 和 topic 订阅；Message 的 `topic://name` 分支会在提交时展开为订阅 URL 快照。
+
+Saga 默认保持声明顺序；设置 `options.concurrent: true` 后，所有前置依赖已成功的分支按层并发执行。失败时仅补偿已经成功的分支，并按依赖反向分层并发补偿。未知、重复、自依赖或成环依赖会在持久化前拒绝。dtm-labs 兼容入口同时解析 `custom_data` 中的 `concurrent` 与零基 `orders`。
 
 ## XA Resource Manager
 
