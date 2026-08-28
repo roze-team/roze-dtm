@@ -70,6 +70,12 @@ docker compose -f compose.redis.yaml up --build
 
 服务默认监听 HTTP `http://127.0.0.1:8090` 和 gRPC `127.0.0.1:36790`。Compose 中的令牌和数据库密码仅用于本地演示，部署前必须替换。生产配置模板位于 `service/config.production.yaml`。
 
+## 管理 Dashboard
+
+浏览器访问 `http://127.0.0.1:8090/dashboard` 可打开只读事务 Dashboard。页面视觉与交互参考 Roze Admin 的 Workspace/Resource Page：工作区指标卡、紧凑筛选区、状态标签、事务进度和分页表格。页面通过 `GET /v1/dashboard` 获取脱敏快照，必须输入控制令牌；令牌只保存在当前页面内存，不写入 URL 或浏览器存储。
+
+Dashboard 数据不包含分支 URL、请求载荷、Header、metadata、Workflow 二进制数据或依赖错误，只返回 GID、类型、状态、分支计数、尝试次数和时间字段。`/dashboard` 只提供静态页面壳，受保护的数据接口仍应仅暴露在管理网络或服务网格内。
+
 ## 存储后端
 
 `application.dtm.store.kind` 支持：

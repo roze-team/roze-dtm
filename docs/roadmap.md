@@ -18,7 +18,7 @@
 | Workflow DSL | 已支持核心 | 静态依赖图、恢复和逆序补偿；callback Workflow 支持复合进度、终态及 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复，互操作待验证 |
 | Redis 存储 | 部分支持 | 已有 Roze topology、单 key Lua CAS/屏障、服务端时间租约、KV/topic；写入 fencing 和真实故障测试待补 |
 | SDK | 部分支持 | 已提供 Rust HTTP/gRPC client；其他语言 SDK 待补 |
-| Dashboard | 待实现 | 基于只读查询、统计和审计事件构建，不暴露密钥或分支载荷 |
+| Dashboard | 部分支持 | 已有参考 Roze Admin 的只读脱敏快照与独立页面；审计事件时间线、Roze Admin 内嵌模块和真实服务集成浏览器验证待补 |
 
 ## 实施顺序
 
@@ -26,6 +26,6 @@
 2. 接入 Roze Outbox/Inbox 和二阶段消息，形成数据库写入到可靠事件发布闭环。
 3. 提供 Workflow DSL 与 Rust SDK，保持控制面协议可版本化。
 4. 在有真实业务需求和数据库支持矩阵后增加 XA。
-5. 补齐 Redis 写入 fencing、真实 standalone/Cluster 故障证据和管理 Dashboard。
+5. 补齐 Redis 写入 fencing、真实 standalone/Cluster 故障证据、Dashboard 审计时间线与 Roze Admin 内嵌模块。
 
 任何标记为“已支持”的生产能力都必须同时具备契约文档、自动测试和可复现的运行入口。

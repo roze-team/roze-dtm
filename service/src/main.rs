@@ -22,7 +22,7 @@ use roze_dtm::{
 use roze_http::{
     rest::{self, HttpResponse, RestServer, RestService},
     routing::{delete, get, post},
-    Json, Path, Query, Router, State,
+    Html, Json, Path, Query, Router, State,
 };
 use roze_service::{LifecycleState, ServiceGroup};
 use serde::{Deserialize, Serialize};
@@ -328,6 +328,49 @@ struct TransactionStats {
     total: usize,
     by_kind: BTreeMap<String, usize>,
     by_status: BTreeMap<String, usize>,
+}
+
+#[derive(Serialize)]
+struct DashboardSnapshot {
+    generated_at_millis: u64,
+    summary: DashboardSummary,
+    transactions: DashboardTransactionPage,
+}
+
+#[derive(Serialize)]
+struct DashboardSummary {
+    total: usize,
+    active: usize,
+    succeeded: usize,
+    aborted: usize,
+    failed: usize,
+    retry_scheduled: usize,
+    by_kind: BTreeMap<String, usize>,
+    by_status: BTreeMap<String, usize>,
+}
+
+#[derive(Serialize)]
+struct DashboardTransactionPage {
+    items: Vec<DashboardTransactionRow>,
+    offset: usize,
+    limit: usize,
+    total: usize,
+}
+
+#[derive(Serialize)]
+struct DashboardTransactionRow {
+    gid: String,
+    kind: String,
+    status: String,
+    branch_count: usize,
+    completed_branch_count: usize,
+    failed_branch_count: usize,
+    total_attempts: u64,
+    next_retry_millis: Option<u64>,
+    created_at_millis: u64,
+    updated_at_millis: u64,
+    timeout_millis: Option<u64>,
+    terminal: bool,
 }
 
 #[derive(Serialize)]
@@ -670,6 +713,7 @@ async fn main() -> anyhow::Result<()> {
 
 fn control_router(state: ControlState) -> Router {
     Router::new()
+        .route("/dashboard", get(dashboard))
         .route("/healthz", get(health))
         .route("/startupz", get(health))
         .route("/readyz", get(ready))
@@ -699,6 +743,7 @@ fn control_router(state: ControlState) -> Router {
         .route("/v1/transactions/{gid}/reset-retry", post(reset_retry_transaction))
         .route("/v1/recover", post(recover_all))
         .route("/v1/stats", get(stats))
+        .route("/v1/dashboard", get(dashboard_snapshot))
         .route("/api/dtmsvr/version", get(compat_version))
         .route("/api/dtmsvr/newGid", get(compat_new_gid))
         .route("/api/dtmsvr/query", get(compat_query))
@@ -721,6 +766,10 @@ fn control_router(state: ControlState) -> Router {
         .route("/api/metrics", get(metrics))
         .route("/api/json-rpc", post(json_rpc))
         .with_state(state)
+}
+
+async fn dashboard() -> Html<&'static str> {
+    Html(include_str!("../static/dashboard.html"))
 }
 
 async fn health() -> HttpResponse {
@@ -1712,6 +1761,149 @@ async fn stats(State(state): State<ControlState>, headers: HeaderMap) -> HttpRes
     }
 }
 
+async fn dashboard_snapshot(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Query(query): Query<TransactionQuery>,
+) -> HttpResponse {
+    if !authorize(&state, &headers) {
+        return unauthorized_response();
+    }
+    match state.dtm.list().await {
+        Ok(transactions) => match build_dashboard_snapshot(transactions, query) {
+            Ok(snapshot) => ok_response(snapshot),
+            Err(message) => error_response(StatusCode::BAD_REQUEST, message),
+        },
+        Err(error) => operation_error("dtm.dashboard.get", None, &error),
+    }
+}
+
+fn build_dashboard_snapshot(
+    transactions: Vec<Transaction>,
+    query: TransactionQuery,
+) -> Result<DashboardSnapshot, &'static str> {
+    let limit = query.limit.unwrap_or(50);
+    if limit == 0 || limit > 200 || query.offset > 1_000_000 {
+        return Err("invalid pagination");
+    }
+    let kind = query.kind.as_deref().map(parse_kind).transpose()?;
+    let status = query.status.as_deref().map(parse_status).transpose()?;
+
+    let mut summary = DashboardSummary {
+        total: transactions.len(),
+        active: 0,
+        succeeded: 0,
+        aborted: 0,
+        failed: 0,
+        retry_scheduled: 0,
+        by_kind: BTreeMap::new(),
+        by_status: BTreeMap::new(),
+    };
+    for transaction in &transactions {
+        *summary
+            .by_kind
+            .entry(kind_name(transaction.kind).to_owned())
+            .or_insert(0) += 1;
+        *summary
+            .by_status
+            .entry(status_name(transaction.status).to_owned())
+            .or_insert(0) += 1;
+        if transaction.status.is_terminal() {
+            match transaction.status {
+                TransactionStatus::Succeeded => summary.succeeded += 1,
+                TransactionStatus::Aborted => summary.aborted += 1,
+                TransactionStatus::Failed => summary.failed += 1,
+                _ => {}
+            }
+        } else {
+            summary.active += 1;
+        }
+        if transaction
+            .branches
+            .iter()
+            .any(|branch| branch.next_retry_millis.is_some())
+        {
+            summary.retry_scheduled += 1;
+        }
+    }
+
+    let filtered = transactions
+        .into_iter()
+        .filter(|transaction| {
+            query
+                .gid
+                .as_deref()
+                .is_none_or(|gid| transaction.gid == gid)
+                && kind.is_none_or(|kind| transaction.kind == kind)
+                && status.is_none_or(|status| transaction.status == status)
+        })
+        .collect::<Vec<_>>();
+    let total = filtered.len();
+    let items = filtered
+        .into_iter()
+        .skip(query.offset)
+        .take(limit)
+        .map(DashboardTransactionRow::from)
+        .collect();
+
+    Ok(DashboardSnapshot {
+        generated_at_millis: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis() as u64),
+        summary,
+        transactions: DashboardTransactionPage {
+            items,
+            offset: query.offset,
+            limit,
+            total,
+        },
+    })
+}
+
+impl From<Transaction> for DashboardTransactionRow {
+    fn from(transaction: Transaction) -> Self {
+        let completed_branch_count = transaction
+            .branches
+            .iter()
+            .filter(|branch| {
+                matches!(
+                    branch.status,
+                    BranchStatus::Succeeded | BranchStatus::Skipped
+                )
+            })
+            .count();
+        let failed_branch_count = transaction
+            .branches
+            .iter()
+            .filter(|branch| branch.status == BranchStatus::Failed)
+            .count();
+        let total_attempts = transaction
+            .branches
+            .iter()
+            .map(|branch| u64::from(branch.attempts))
+            .sum();
+        let next_retry_millis = transaction
+            .branches
+            .iter()
+            .filter_map(|branch| branch.next_retry_millis)
+            .min();
+        Self {
+            gid: transaction.gid,
+            kind: kind_name(transaction.kind).to_owned(),
+            status: status_name(transaction.status).to_owned(),
+            branch_count: transaction.branches.len(),
+            completed_branch_count,
+            failed_branch_count,
+            total_attempts,
+            next_retry_millis,
+            created_at_millis: transaction.created_at_millis,
+            updated_at_millis: transaction.updated_at_millis,
+            timeout_millis: transaction.timeout_millis,
+            terminal: transaction.status.is_terminal(),
+        }
+    }
+}
+
 fn build_transaction(
     kind: TransactionKind,
     request: SubmitTransactionRequest,
@@ -2283,6 +2475,83 @@ mod tests {
         assert!(!constant_time_eq(b"same-token", b"same-token-longer"));
     }
 
+    #[test]
+    fn dashboard_snapshot_is_bounded_and_redacted() {
+        let mut branch = Branch::tcc_try(
+            "inventory",
+            "http://inventory/try?secret=payload",
+            "http://inventory/confirm",
+            "http://inventory/cancel",
+            serde_json::json!({"card_number": "4111111111111111"}),
+        );
+        branch.status = BranchStatus::Failed;
+        branch.attempts = 3;
+        branch.last_error = Some("database password leaked by dependency".to_owned());
+        branch.next_retry_millis = Some(42_000);
+        let mut transaction = Transaction::tcc("dashboard-gid", vec![branch]);
+        transaction.status = TransactionStatus::Aborting;
+        transaction
+            .metadata
+            .insert("authorization".to_owned(), "Bearer secret".to_owned());
+
+        let snapshot = build_dashboard_snapshot(
+            vec![transaction],
+            TransactionQuery {
+                limit: Some(10),
+                ..TransactionQuery::default()
+            },
+        )
+        .expect("dashboard snapshot");
+        assert_eq!(snapshot.summary.total, 1);
+        assert_eq!(snapshot.summary.active, 1);
+        assert_eq!(snapshot.summary.retry_scheduled, 1);
+        assert_eq!(snapshot.transactions.items[0].failed_branch_count, 1);
+        assert_eq!(snapshot.transactions.items[0].total_attempts, 3);
+
+        let wire = serde_json::to_string(&snapshot).expect("serialize dashboard snapshot");
+        for sensitive in [
+            "4111111111111111",
+            "secret=payload",
+            "database password",
+            "Bearer secret",
+            "inventory/confirm",
+            "inventory/cancel",
+        ] {
+            assert!(!wire.contains(sensitive));
+        }
+    }
+
+    #[test]
+    fn dashboard_snapshot_validates_filters_and_pagination() {
+        assert!(build_dashboard_snapshot(
+            Vec::new(),
+            TransactionQuery {
+                kind: Some("unknown".to_owned()),
+                ..TransactionQuery::default()
+            },
+        )
+        .is_err());
+        assert!(build_dashboard_snapshot(
+            Vec::new(),
+            TransactionQuery {
+                limit: Some(201),
+                ..TransactionQuery::default()
+            },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn dashboard_page_keeps_credentials_ephemeral() {
+        let page = include_str!("../static/dashboard.html");
+        assert!(page.contains("/v1/dashboard"));
+        assert!(page.contains("Roze DTM Control Plane"));
+        assert!(!page.contains("localStorage"));
+        assert!(!page.contains("sessionStorage"));
+        assert!(!page.contains("innerHTML"));
+        assert!(!page.contains("https://"));
+    }
+
     #[tokio::test]
     async fn control_routes_require_token_but_health_is_public() {
         let token = "control-token-with-at-least-32-bytes";
@@ -2299,6 +2568,18 @@ mod tests {
             .unwrap();
         assert_eq!(health.status(), StatusCode::OK);
 
+        let dashboard_page = router
+            .clone()
+            .oneshot(
+                http::Request::builder()
+                    .uri("/dashboard")
+                    .body(rest::empty_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dashboard_page.status(), StatusCode::OK);
+
         let unauthorized = router
             .clone()
             .oneshot(
@@ -2310,6 +2591,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let unauthorized_dashboard = router
+            .clone()
+            .oneshot(
+                http::Request::builder()
+                    .uri("/v1/dashboard")
+                    .body(rest::empty_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized_dashboard.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized_dashboard = router
+            .clone()
+            .oneshot(
+                http::Request::builder()
+                    .uri("/v1/dashboard")
+                    .header(AUTHORIZATION, format!("Bearer {token}"))
+                    .body(rest::empty_body())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(authorized_dashboard.status(), StatusCode::OK);
 
         let authorized = router
             .oneshot(

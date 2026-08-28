@@ -34,6 +34,12 @@ HTTP、JSON-RPC 和 gRPC 兼容协议需要使用固定上游客户端版本执�
 
 当前状态：协议合同和源码测试已存在；真实 Go/Rust 跨语言互操作仍未执行。
 
+## Dashboard
+
+`GET /dashboard` 仅提供静态页面，`GET /v1/dashboard` 必须验证 Bearer 控制令牌。生产验收需要覆盖未授权拒绝、筛选与分页边界、空数据、各事务状态、窄屏和系统暗色模式，并检查浏览器网络响应中不存在分支 URL、payload、Header、metadata、Workflow 数据或依赖错误。控制令牌不得进入 URL、localStorage、sessionStorage、日志或表格 DOM。
+
+当前状态：页面和脱敏快照源码测试已加入，视觉与信息层级已按 `roze-admin` 的 Workspace/Resource Page 规范对齐；已用本地静态 HTTP 服务完成浏览器渲染和控制台错误检查。受当前禁编译要求约束，尚未执行真实 Roze 服务、受保护 API 或端到端验证，因此状态保持 `inconclusive`。
+
 ## 生产证据要求
 
 生产证据必须绑定确切 Git revision，记录依赖拓扑、命令、持续时间、工作负载、错误预算、故障注入时间线、资源趋势和最终判定。未执行、被中断或缺少工件的运行一律标记为 `inconclusive`，不得根据源码检查补写通过结论。

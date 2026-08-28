@@ -68,10 +68,14 @@ Authorization: Bearer <ROZE_DTM_CONTROL_TOKEN>
 - `POST /v1/transactions/{gid}/reset-retry`：立即重新调度失败或补偿中的分支。
 - `POST /v1/recover`：触发一次全局恢复扫描。
 - `GET /v1/stats`：按类型和状态统计事务。
+- `GET /v1/dashboard`：返回只读、分页且脱敏的 Dashboard 快照。
+- `GET /dashboard`：返回参考 Roze Admin Workspace/Resource Page 视觉的静态管理页面；不包含受保护数据。
 - `GET /healthz`、`GET /startupz`、`GET /readyz`：运行状态探针。
 - `GET /metrics`：Prometheus 指标。
 
 所有业务响应使用 Roze 数字信封：成功 `code: 0`，错误 code 与 HTTP 状态一致。查询参数支持 `gid`、`kind`、`status`、`offset`、`limit`；默认 limit 为 50，最大为 200。
+
+Dashboard API 使用同一组过滤和分页边界，但只返回管理摘要字段。它明确排除分支 Action/Confirm/Cancel/Compensate URL、payload、Header、metadata、Workflow progress data、回滚原因和依赖错误。页面不会持久化控制令牌，也不会加载第三方脚本、字体或图片；部署方仍需在入口层为 `/dashboard` 与 `/v1/dashboard` 配置 TLS、访问来源限制和常规安全响应头。
 
 ## TCC 请求
 
