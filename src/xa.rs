@@ -345,7 +345,7 @@ impl MySqlXaResourceManager {
             XaPhase2::Commit => "commit",
             XaPhase2::Rollback => "rollback",
         };
-        let result = sqlx::query(audited_mysql_xa_sql(command, &branch.resource_id()))
+        let result = sqlx::raw_sql(audited_mysql_xa_sql(command, &branch.resource_id()))
             .execute(&self.pool)
             .await;
         match result {
@@ -573,7 +573,7 @@ impl PostgresXaResourceManager {
             XaPhase2::Commit => "commit",
             XaPhase2::Rollback => "rollback",
         };
-        let result = sqlx::query(audited_postgres_xa_sql(command, &branch.resource_id()))
+        let result = sqlx::raw_sql(audited_postgres_xa_sql(command, &branch.resource_id()))
             .execute(&self.pool)
             .await;
         match result {
@@ -885,7 +885,7 @@ async fn execute_mysql(
     connection: &mut MySqlConnection,
     statement: impl sqlx::SqlSafeStr,
 ) -> anyhow::Result<()> {
-    sqlx::query(statement).execute(connection).await?;
+    sqlx::raw_sql(statement).execute(connection).await?;
     Ok(())
 }
 
@@ -906,7 +906,7 @@ async fn execute_postgres(
     connection: &mut PgConnection,
     statement: impl sqlx::SqlSafeStr,
 ) -> anyhow::Result<()> {
-    sqlx::query(statement).execute(connection).await?;
+    sqlx::raw_sql(statement).execute(connection).await?;
     Ok(())
 }
 
