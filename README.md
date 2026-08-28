@@ -85,11 +85,11 @@ Dashboard 数据不包含分支 URL、请求载荷、Header、metadata、Workflo
 - `sqlite`：单实例持久化。
 - `postgres`：推荐的生产后端，支持多实例恢复租约。
 - `mysql`：生产后端，支持多实例恢复租约。
-- `redis`：复用 Roze standalone/Cluster 客户端，提供 Lua CAS、原子屏障、版本化 KV 和基于 Redis 服务端时间的恢复租约。
+- `redis`：复用 Roze standalone/Cluster 客户端，提供 revision + payload CAS、原子屏障、版本化 KV，以及基于 Redis 服务端时间和单调 epoch 的恢复租约写入 fencing。
 
-所有关系型后端会在启动时幂等创建事务、分支屏障和恢复租约表。连接由 Roze `roze-sqlx` 管理，可通过 `max_connections` 设置连接池上限。Redis 配置使用 `redis_url` 或 `redis_cluster_urls`，并要求安全的 `redis_namespace`；`redis_operation_timeout_ms`（默认 5000）同时限制建连和每次命令。所有数据 key 共享显式 Cluster hash tag，但事务、KV、屏障和租约脚本每次只访问一个 key。
+所有关系型后端会在启动时幂等创建事务、分支屏障和恢复租约表。连接由 Roze `roze-sqlx` 管理，可通过 `max_connections` 设置连接池上限。Redis 配置使用 `redis_url` 或 `redis_cluster_urls`，并要求安全的 `redis_namespace`；`redis_operation_timeout_ms`（默认 5000）同时限制建连和每次命令。所有数据 key 共享显式 Cluster hash tag；普通 CAS/屏障脚本访问单 key，恢复写入脚本在同一槽内原子访问事务或屏障 Hash 与租约 Hash。
 
-动态分支注册由存储层原子执行：内存后端使用写锁，PostgreSQL/MySQL 使用行锁，SQLite 和 Redis 使用带冲突重试的比较更新，避免多实例并发注册互相覆盖。五种后端也提供版本化通用 KV 和 topic 订阅；Message 的 `topic://name` 分支会在提交时展开为订阅 URL 快照。
+动态分支注册由存储层原子执行：内存后端使用写锁，PostgreSQL/MySQL 使用行锁，SQLite 和 Redis 使用带冲突重试的比较更新，避免多实例并发注册互相覆盖。事务载荷包含向后兼容的单调 `revision`；旧记录缺失该字段时从 0 开始，后续成功变更递增。Redis 普通状态推进拒绝 stale revision，恢复推进还要求 owner、epoch 和 Redis 服务端过期时间同时匹配。五种后端也提供版本化通用 KV 和 topic 订阅；Message 的 `topic://name` 分支会在提交时展开为订阅 URL 快照。
 
 ## XA Resource Manager
 

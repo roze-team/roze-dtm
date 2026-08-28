@@ -7,8 +7,9 @@ use roze_redis::{redis, RedisClient, RedisConnection};
 
 use crate::{
     append_dynamic_branch, append_workflow_progress, apply_workflow_completion,
-    current_millis, defer_workflow_recovery, BarrierDecision, Branch, BranchBarrier, KvEntry,
-    Transaction, TransactionStatus, TransactionStore, WorkflowProgress, WorkflowRecoveryDelay,
+    bump_transaction_revision, defer_workflow_recovery, BarrierDecision, Branch, BranchBarrier,
+    KvEntry, RecoveryLeaseFence, Transaction, TransactionStatus, TransactionStore,
+    WorkflowProgress, WorkflowRecoveryDelay,
 };
 
 const TRANSACTION_MUTATION_ATTEMPTS: usize = 16;
@@ -46,14 +47,84 @@ return 'execute'
 const ACQUIRE_RECOVERY_LEASE: &str = r#"
 local server_time = redis.call('TIME')
 local now_millis = server_time[1] * 1000 + math.floor(server_time[2] / 1000)
-local ttl_millis = tonumber(ARGV[4])
+local ttl_millis = tonumber(ARGV[5])
 local current_owner = redis.call('HGET', KEYS[1], ARGV[1])
 local current_expiry = tonumber(redis.call('HGET', KEYS[1], ARGV[2]) or '0')
-if current_owner and current_owner ~= ARGV[3] and current_expiry > now_millis then
+local current_epoch = tonumber(redis.call('HGET', KEYS[1], ARGV[3]) or '0')
+if current_owner and current_expiry > now_millis then
+  if current_owner ~= ARGV[4] then
+    return {0, current_epoch}
+  end
+  if current_epoch < 1 then
+    current_epoch = 1
+    redis.call('HSET', KEYS[1], ARGV[3], current_epoch)
+  end
+  redis.call('HSET', KEYS[1], ARGV[2], now_millis + ttl_millis)
+  return {1, current_epoch}
+end
+local next_epoch = current_epoch + 1
+redis.call(
+  'HSET', KEYS[1],
+  ARGV[1], ARGV[4],
+  ARGV[2], now_millis + ttl_millis,
+  ARGV[3], next_epoch
+)
+return {1, next_epoch}
+"#;
+
+const FENCED_CAS_HASH_FIELD: &str = r#"
+local server_time = redis.call('TIME')
+local now_millis = server_time[1] * 1000 + math.floor(server_time[2] / 1000)
+local owner = redis.call('HGET', KEYS[2], ARGV[4])
+local expiry = tonumber(redis.call('HGET', KEYS[2], ARGV[5]) or '0')
+local epoch = tonumber(redis.call('HGET', KEYS[2], ARGV[6]) or '0')
+if owner ~= ARGV[7] or expiry <= now_millis or epoch ~= tonumber(ARGV[8]) then
+  return -2
+end
+local current = redis.call('HGET', KEYS[1], ARGV[1])
+if not current then
+  return -1
+end
+if current ~= ARGV[2] then
   return 0
 end
-redis.call('HSET', KEYS[1], ARGV[1], ARGV[3], ARGV[2], now_millis + ttl_millis)
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
 return 1
+"#;
+
+const FENCED_BARRIER_DECISION: &str = r#"
+local server_time = redis.call('TIME')
+local now_millis = server_time[1] * 1000 + math.floor(server_time[2] / 1000)
+local owner = redis.call('HGET', KEYS[2], ARGV[5])
+local expiry = tonumber(redis.call('HGET', KEYS[2], ARGV[6]) or '0')
+local epoch = tonumber(redis.call('HGET', KEYS[2], ARGV[7]) or '0')
+if owner ~= ARGV[8] or expiry <= now_millis or epoch ~= tonumber(ARGV[9]) then
+  return 'fence_lost'
+end
+if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
+  return 'duplicate'
+end
+if ARGV[4] == 'try' and redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 then
+  return 'cancelled_try'
+end
+if ARGV[4] == 'cancel' and redis.call('HEXISTS', KEYS[1], ARGV[3]) == 0 then
+  redis.call('HSET', KEYS[1], ARGV[1], '1')
+  return 'null_compensation'
+end
+redis.call('HSET', KEYS[1], ARGV[1], '1')
+return 'execute'
+"#;
+
+const FENCED_DELETE_HASH_FIELD: &str = r#"
+local server_time = redis.call('TIME')
+local now_millis = server_time[1] * 1000 + math.floor(server_time[2] / 1000)
+local owner = redis.call('HGET', KEYS[2], ARGV[2])
+local expiry = tonumber(redis.call('HGET', KEYS[2], ARGV[3]) or '0')
+local epoch = tonumber(redis.call('HGET', KEYS[2], ARGV[4]) or '0')
+if owner ~= ARGV[5] or expiry <= now_millis or epoch ~= tonumber(ARGV[6]) then
+  return -2
+end
+return redis.call('HDEL', KEYS[1], ARGV[1])
 "#;
 
 #[derive(Clone)]
@@ -265,6 +336,101 @@ impl RedisTransactionStore {
         }
         anyhow::bail!("transaction {gid} {operation} is contended")
     }
+
+    async fn mutate_transaction_fenced<F>(
+        &self,
+        gid: &str,
+        operation: &str,
+        fence: &RecoveryLeaseFence,
+        mut mutate: F,
+    ) -> anyhow::Result<Transaction>
+    where
+        F: FnMut(&mut Transaction) -> anyhow::Result<()>,
+    {
+        validate_recovery_fence(fence)?;
+        let (owner_field, expiry_field, epoch_field) = lease_fields(&fence.name);
+        for _ in 0..TRANSACTION_MUTATION_ATTEMPTS {
+            let previous_payload = self
+                .transaction_payload(gid)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+            let mut transaction: Transaction = serde_json::from_str(&previous_payload)?;
+            mutate(&mut transaction)?;
+            let payload = serde_json::to_string(&transaction)?;
+            let mut connection = self.connection().await?;
+            let changed: i64 = self
+                .redis_call(
+                    "fenced transaction compare-and-swap",
+                    redis::Script::new(FENCED_CAS_HASH_FIELD)
+                        .key(&self.keys.transactions)
+                        .key(&self.keys.leases)
+                        .arg(gid)
+                        .arg(&previous_payload)
+                        .arg(payload)
+                        .arg(&owner_field)
+                        .arg(&expiry_field)
+                        .arg(&epoch_field)
+                        .arg(&fence.owner)
+                        .arg(fence.epoch)
+                        .invoke_async(&mut connection),
+                )
+                .await?;
+            match changed {
+                1 => return Ok(transaction),
+                0 => continue,
+                -1 => anyhow::bail!("transaction not found: {gid}"),
+                -2 => anyhow::bail!("Redis recovery lease fence is no longer valid"),
+                other => anyhow::bail!("unknown Redis fenced transaction CAS result: {other}"),
+            }
+        }
+        anyhow::bail!("transaction {gid} {operation} is contended")
+    }
+
+    async fn update_transaction_fenced_inner(
+        &self,
+        mut transaction: Transaction,
+        fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<()> {
+        validate_recovery_fence(fence)?;
+        let expected_revision = transaction.revision;
+        let previous_payload = self
+            .transaction_payload(&transaction.gid)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("transaction not found: {}", transaction.gid))?;
+        let current: Transaction = serde_json::from_str(&previous_payload)?;
+        anyhow::ensure!(
+            current.revision == expected_revision,
+            "Redis transaction revision conflict"
+        );
+        bump_transaction_revision(&mut transaction);
+        let payload = serde_json::to_string(&transaction)?;
+        let (owner_field, expiry_field, epoch_field) = lease_fields(&fence.name);
+        let mut connection = self.connection().await?;
+        let changed: i64 = self
+            .redis_call(
+                "fenced transaction update",
+                redis::Script::new(FENCED_CAS_HASH_FIELD)
+                    .key(&self.keys.transactions)
+                    .key(&self.keys.leases)
+                    .arg(&transaction.gid)
+                    .arg(previous_payload)
+                    .arg(payload)
+                    .arg(owner_field)
+                    .arg(expiry_field)
+                    .arg(epoch_field)
+                    .arg(&fence.owner)
+                    .arg(fence.epoch)
+                    .invoke_async(&mut connection),
+            )
+            .await?;
+        match changed {
+            1 => Ok(()),
+            0 => anyhow::bail!("Redis transaction revision conflict"),
+            -1 => anyhow::bail!("transaction not found: {}", transaction.gid),
+            -2 => anyhow::bail!("Redis recovery lease fence is no longer valid"),
+            other => anyhow::bail!("unknown Redis fenced transaction update result: {other}"),
+        }
+    }
 }
 
 #[async_trait]
@@ -294,20 +460,44 @@ impl TransactionStore for RedisTransactionStore {
     }
 
     async fn update_transaction(&self, mut transaction: Transaction) -> anyhow::Result<()> {
-        transaction.updated_at_millis = current_millis();
+        let expected_revision = transaction.revision;
+        let previous_payload = self
+            .transaction_payload(&transaction.gid)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("transaction not found: {}", transaction.gid))?;
+        let current: Transaction = serde_json::from_str(&previous_payload)?;
+        anyhow::ensure!(
+            current.revision == expected_revision,
+            "Redis transaction revision conflict"
+        );
+        bump_transaction_revision(&mut transaction);
         let payload = serde_json::to_string(&transaction)?;
         let mut connection = self.connection().await?;
-        let _: i64 = self
+        let changed: i64 = self
             .redis_call(
                 "transaction update",
-                redis::cmd("HSET")
-                    .arg(&self.keys.transactions)
+                redis::Script::new(CAS_HASH_FIELD)
+                    .key(&self.keys.transactions)
                     .arg(&transaction.gid)
+                    .arg(previous_payload)
                     .arg(payload)
-                    .query_async(&mut connection),
+                    .invoke_async(&mut connection),
             )
             .await?;
-        Ok(())
+        match changed {
+            1 => Ok(()),
+            0 => anyhow::bail!("Redis transaction revision conflict"),
+            -1 => anyhow::bail!("transaction not found: {}", transaction.gid),
+            other => anyhow::bail!("unknown Redis transaction update result: {other}"),
+        }
+    }
+
+    async fn update_transaction_fenced(
+        &self,
+        transaction: Transaction,
+        fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<()> {
+        self.update_transaction_fenced_inner(transaction, fence).await
     }
 
     async fn register_branch(&self, gid: &str, branch: Branch) -> anyhow::Result<Transaction> {
@@ -323,6 +513,18 @@ impl TransactionStore for RedisTransactionStore {
         progress: WorkflowProgress,
     ) -> anyhow::Result<Transaction> {
         self.mutate_transaction(gid, "workflow progress update", |transaction| {
+            append_workflow_progress(transaction, progress.clone())
+        })
+        .await
+    }
+
+    async fn record_workflow_progress_fenced(
+        &self,
+        gid: &str,
+        progress: WorkflowProgress,
+        fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<Transaction> {
+        self.mutate_transaction_fenced(gid, "workflow progress update", fence, |transaction| {
             append_workflow_progress(transaction, progress.clone())
         })
         .await
@@ -346,12 +548,43 @@ impl TransactionStore for RedisTransactionStore {
         .await
     }
 
+    async fn finish_workflow_fenced(
+        &self,
+        gid: &str,
+        status: TransactionStatus,
+        rollback_reason: Option<String>,
+        result: Option<String>,
+        fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<Transaction> {
+        self.mutate_transaction_fenced(gid, "workflow completion", fence, |transaction| {
+            apply_workflow_completion(
+                transaction,
+                status,
+                rollback_reason.clone(),
+                result.clone(),
+            )
+        })
+        .await
+    }
+
     async fn defer_workflow_recovery(
         &self,
         gid: &str,
         delay: WorkflowRecoveryDelay,
     ) -> anyhow::Result<Transaction> {
         self.mutate_transaction(gid, "workflow recovery update", |transaction| {
+            defer_workflow_recovery(transaction, delay.clone())
+        })
+        .await
+    }
+
+    async fn defer_workflow_recovery_fenced(
+        &self,
+        gid: &str,
+        delay: WorkflowRecoveryDelay,
+        fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<Transaction> {
+        self.mutate_transaction_fenced(gid, "workflow recovery update", fence, |transaction| {
             defer_workflow_recovery(transaction, delay.clone())
         })
         .await
@@ -511,6 +744,45 @@ impl TransactionStore for RedisTransactionStore {
         }
     }
 
+    async fn barrier_fenced(
+        &self,
+        barrier: BranchBarrier,
+        fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<BarrierDecision> {
+        validate_recovery_fence(fence)?;
+        let field = barrier_field(&barrier.gid, &barrier.branch_id, &barrier.op)?;
+        let cancel_field = barrier_field(&barrier.gid, &barrier.branch_id, "cancel")?;
+        let try_field = barrier_field(&barrier.gid, &barrier.branch_id, "try")?;
+        let (owner_field, expiry_field, epoch_field) = lease_fields(&fence.name);
+        let mut connection = self.connection().await?;
+        let decision: String = self
+            .redis_call(
+                "fenced barrier decision",
+                redis::Script::new(FENCED_BARRIER_DECISION)
+                    .key(&self.keys.barriers)
+                    .key(&self.keys.leases)
+                    .arg(field)
+                    .arg(cancel_field)
+                    .arg(try_field)
+                    .arg(&barrier.op)
+                    .arg(owner_field)
+                    .arg(expiry_field)
+                    .arg(epoch_field)
+                    .arg(&fence.owner)
+                    .arg(fence.epoch)
+                    .invoke_async(&mut connection),
+            )
+            .await?;
+        match decision.as_str() {
+            "execute" => Ok(BarrierDecision::Execute),
+            "duplicate" => Ok(BarrierDecision::SkipDuplicate),
+            "null_compensation" => Ok(BarrierDecision::SkipNullCompensation),
+            "cancelled_try" => Ok(BarrierDecision::SkipCancelledTry),
+            "fence_lost" => anyhow::bail!("Redis recovery lease fence is no longer valid"),
+            other => anyhow::bail!("unknown Redis fenced barrier decision: {other}"),
+        }
+    }
+
     async fn release_barrier(&self, barrier: &BranchBarrier) -> anyhow::Result<()> {
         let mut connection = self.connection().await?;
         let _: i64 = self
@@ -523,6 +795,36 @@ impl TransactionStore for RedisTransactionStore {
             )
             .await?;
         Ok(())
+    }
+
+    async fn release_barrier_fenced(
+        &self,
+        barrier: &BranchBarrier,
+        fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<()> {
+        validate_recovery_fence(fence)?;
+        let (owner_field, expiry_field, epoch_field) = lease_fields(&fence.name);
+        let mut connection = self.connection().await?;
+        let deleted: i64 = self
+            .redis_call(
+                "fenced barrier release",
+                redis::Script::new(FENCED_DELETE_HASH_FIELD)
+                    .key(&self.keys.barriers)
+                    .key(&self.keys.leases)
+                    .arg(barrier_field(&barrier.gid, &barrier.branch_id, &barrier.op)?)
+                    .arg(owner_field)
+                    .arg(expiry_field)
+                    .arg(epoch_field)
+                    .arg(&fence.owner)
+                    .arg(fence.epoch)
+                    .invoke_async(&mut connection),
+            )
+            .await?;
+        match deleted {
+            0 | 1 => Ok(()),
+            -2 => anyhow::bail!("Redis recovery lease fence is no longer valid"),
+            other => anyhow::bail!("unknown Redis fenced barrier release result: {other}"),
+        }
     }
 
     async fn try_acquire_recovery_lease(
@@ -543,25 +845,43 @@ impl TransactionStore for RedisTransactionStore {
             (1..=86_400_000).contains(&ttl_millis),
             "invalid Redis recovery lease TTL"
         );
-        let lease = URL_SAFE_NO_PAD.encode(name.as_bytes());
-        let owner_field = format!("{lease}:owner");
-        let expiry_field = format!("{lease}:expiry");
+        Ok(self
+            .acquire_recovery_lease(name, owner, ttl_millis)
+            .await?
+            .is_some())
+    }
+
+    async fn acquire_recovery_lease(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl_millis: u64,
+    ) -> anyhow::Result<Option<RecoveryLeaseFence>> {
+        validate_recovery_lease_input(name, owner, ttl_millis)?;
+        let (owner_field, expiry_field, epoch_field) = lease_fields(name);
         let mut connection = self.connection().await?;
-        let acquired: i64 = self
+        let (acquired, epoch): (i64, i64) = self
             .redis_call(
                 "recovery lease acquisition",
                 redis::Script::new(ACQUIRE_RECOVERY_LEASE)
                     .key(&self.keys.leases)
                     .arg(owner_field)
                     .arg(expiry_field)
+                    .arg(epoch_field)
                     .arg(owner)
                     .arg(ttl_millis)
                     .invoke_async(&mut connection),
             )
             .await?;
         match acquired {
-            0 => Ok(false),
-            1 => Ok(true),
+            0 => Ok(None),
+            1 => Ok(Some(RecoveryLeaseFence {
+                name: name.to_owned(),
+                owner: owner.to_owned(),
+                epoch: epoch
+                    .try_into()
+                    .context("invalid Redis recovery lease epoch")?,
+            })),
             other => anyhow::bail!("unknown Redis recovery lease result: {other}"),
         }
     }
@@ -577,6 +897,41 @@ pub fn validate_redis_namespace(namespace: &str) -> anyhow::Result<()> {
         "Redis DTM namespace must contain 1 to 64 ASCII letters, digits, '-' or '_'"
     );
     Ok(())
+}
+
+fn validate_recovery_lease_input(
+    name: &str,
+    owner: &str,
+    ttl_millis: u64,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !name.is_empty() && name.len() <= 128,
+        "invalid Redis recovery lease name"
+    );
+    anyhow::ensure!(
+        !owner.is_empty() && owner.len() <= 128,
+        "invalid Redis recovery lease owner"
+    );
+    anyhow::ensure!(
+        (1..=86_400_000).contains(&ttl_millis),
+        "invalid Redis recovery lease TTL"
+    );
+    Ok(())
+}
+
+fn validate_recovery_fence(fence: &RecoveryLeaseFence) -> anyhow::Result<()> {
+    validate_recovery_lease_input(&fence.name, &fence.owner, 1)?;
+    anyhow::ensure!(fence.epoch > 0, "invalid Redis recovery lease epoch");
+    Ok(())
+}
+
+fn lease_fields(name: &str) -> (String, String, String) {
+    let lease = URL_SAFE_NO_PAD.encode(name.as_bytes());
+    (
+        format!("{lease}:owner"),
+        format!("{lease}:expiry"),
+        format!("{lease}:epoch"),
+    )
 }
 
 fn kv_field(category: &str, key: &str) -> String {
@@ -631,6 +986,35 @@ mod tests {
             barrier_field("a:b", "c", "try").expect("field"),
             barrier_field("a", "b:c", "try").expect("field")
         );
+        assert_ne!(lease_fields("ab").0, lease_fields("a").0);
+    }
+
+    #[test]
+    fn recovery_fencing_scripts_bind_owner_epoch_expiry_and_server_time() {
+        for script in [
+            FENCED_CAS_HASH_FIELD,
+            FENCED_BARRIER_DECISION,
+            FENCED_DELETE_HASH_FIELD,
+        ] {
+            assert!(script.contains("redis.call('TIME')"));
+            assert!(script.contains("owner"));
+            assert!(script.contains("expiry"));
+            assert!(script.contains("epoch"));
+            assert!(script.contains("now_millis"));
+        }
+        assert!(ACQUIRE_RECOVERY_LEASE.contains("next_epoch = current_epoch + 1"));
+        assert!(validate_recovery_fence(&RecoveryLeaseFence {
+            name: "recovery".to_owned(),
+            owner: "worker-a".to_owned(),
+            epoch: 1,
+        })
+        .is_ok());
+        assert!(validate_recovery_fence(&RecoveryLeaseFence {
+            name: "recovery".to_owned(),
+            owner: "worker-a".to_owned(),
+            epoch: 0,
+        })
+        .is_err());
     }
 
     #[tokio::test]
@@ -672,14 +1056,47 @@ mod tests {
         let mut updated = entry;
         updated.version = 2;
         assert!(store.update_kv(updated, 1).await.expect("update KV"));
+        let fence = store
+            .acquire_recovery_lease("recovery", "worker-a", 5_000)
+            .await
+            .expect("acquire lease")
+            .expect("lease acquired");
+        let renewed = store
+            .acquire_recovery_lease("recovery", "worker-a", 5_000)
+            .await
+            .expect("renew lease")
+            .expect("lease renewed");
+        assert_eq!(renewed.epoch, fence.epoch);
         assert!(store
-            .try_acquire_recovery_lease("recovery", "worker-a", 5_000)
+            .acquire_recovery_lease("recovery", "worker-b", 5_000)
             .await
-            .expect("acquire lease"));
-        assert!(!store
-            .try_acquire_recovery_lease("recovery", "worker-b", 5_000)
+            .expect("reject competing lease")
+            .is_none());
+
+        let mut fenced_transaction = store
+            .get_transaction("redis-gid")
             .await
-            .expect("reject competing lease"));
+            .expect("read fenced transaction")
+            .expect("fenced transaction exists");
+        fenced_transaction.status = TransactionStatus::Prepared;
+        store
+            .update_transaction_fenced(fenced_transaction.clone(), &fence)
+            .await
+            .expect("valid fence updates transaction");
+        let fenced_transaction = store
+            .get_transaction("redis-gid")
+            .await
+            .expect("read updated fenced transaction")
+            .expect("updated fenced transaction exists");
+        assert_eq!(fenced_transaction.status, TransactionStatus::Prepared);
+        let stale = RecoveryLeaseFence {
+            epoch: fence.epoch.saturating_add(1),
+            ..fence
+        };
+        assert!(store
+            .update_transaction_fenced(fenced_transaction, &stale)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

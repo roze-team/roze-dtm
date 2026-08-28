@@ -306,6 +306,8 @@ pub struct Transaction {
     pub branches: Vec<Branch>,
     pub created_at_millis: u64,
     pub updated_at_millis: u64,
+    #[serde(default)]
+    pub revision: u64,
     pub timeout_millis: Option<u64>,
     #[serde(default)]
     pub options: TransactionOptions,
@@ -348,6 +350,7 @@ impl Transaction {
             branches,
             created_at_millis: now,
             updated_at_millis: now,
+            revision: 1,
             timeout_millis: None,
             options: TransactionOptions::default(),
             workflow_progresses: Vec::new(),
@@ -460,11 +463,31 @@ pub enum BarrierDecision {
     SkipCancelledTry,
 }
 
+/// Identifies one recovery-lease epoch.
+///
+/// Stores with native fencing issue a new epoch whenever an expired lease is
+/// acquired, even when the owner string is unchanged, and validate all three
+/// fields atomically with the protected write. Other stores retain their
+/// existing lease behavior through the default trait methods.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryLeaseFence {
+    pub name: String,
+    pub owner: String,
+    pub epoch: u64,
+}
+
 #[async_trait]
 pub trait TransactionStore: Send + Sync + 'static {
     async fn insert_transaction(&self, tx: Transaction) -> anyhow::Result<()>;
     async fn get_transaction(&self, gid: &str) -> anyhow::Result<Option<Transaction>>;
     async fn update_transaction(&self, tx: Transaction) -> anyhow::Result<()>;
+    async fn update_transaction_fenced(
+        &self,
+        tx: Transaction,
+        _fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<()> {
+        self.update_transaction(tx).await
+    }
     /// Atomically validates and appends a dynamic branch.
     ///
     /// Implementations must serialize concurrent registrations for the same
@@ -477,6 +500,14 @@ pub trait TransactionStore: Send + Sync + 'static {
     ) -> anyhow::Result<Transaction> {
         anyhow::bail!("workflow progress persistence is not supported by this store")
     }
+    async fn record_workflow_progress_fenced(
+        &self,
+        gid: &str,
+        progress: WorkflowProgress,
+        _fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<Transaction> {
+        self.record_workflow_progress(gid, progress).await
+    }
     async fn finish_workflow(
         &self,
         _gid: &str,
@@ -486,12 +517,31 @@ pub trait TransactionStore: Send + Sync + 'static {
     ) -> anyhow::Result<Transaction> {
         anyhow::bail!("workflow completion persistence is not supported by this store")
     }
+    async fn finish_workflow_fenced(
+        &self,
+        gid: &str,
+        status: TransactionStatus,
+        rollback_reason: Option<String>,
+        result: Option<String>,
+        _fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<Transaction> {
+        self.finish_workflow(gid, status, rollback_reason, result)
+            .await
+    }
     async fn defer_workflow_recovery(
         &self,
         _gid: &str,
         _delay: WorkflowRecoveryDelay,
     ) -> anyhow::Result<Transaction> {
         anyhow::bail!("workflow recovery persistence is not supported by this store")
+    }
+    async fn defer_workflow_recovery_fenced(
+        &self,
+        gid: &str,
+        delay: WorkflowRecoveryDelay,
+        _fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<Transaction> {
+        self.defer_workflow_recovery(gid, delay).await
     }
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>>;
     async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>>;
@@ -506,7 +556,21 @@ pub trait TransactionStore: Send + Sync + 'static {
     async fn update_kv(&self, entry: KvEntry, expected_version: u64) -> anyhow::Result<bool>;
     async fn delete_kv(&self, category: &str, key: &str) -> anyhow::Result<bool>;
     async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision>;
+    async fn barrier_fenced(
+        &self,
+        barrier: BranchBarrier,
+        _fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<BarrierDecision> {
+        self.barrier(barrier).await
+    }
     async fn release_barrier(&self, barrier: &BranchBarrier) -> anyhow::Result<()>;
+    async fn release_barrier_fenced(
+        &self,
+        barrier: &BranchBarrier,
+        _fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<()> {
+        self.release_barrier(barrier).await
+    }
     async fn try_acquire_recovery_lease(
         &self,
         _name: &str,
@@ -514,6 +578,21 @@ pub trait TransactionStore: Send + Sync + 'static {
         _ttl_millis: u64,
     ) -> anyhow::Result<bool> {
         Ok(true)
+    }
+    async fn acquire_recovery_lease(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl_millis: u64,
+    ) -> anyhow::Result<Option<RecoveryLeaseFence>> {
+        Ok(self
+            .try_acquire_recovery_lease(name, owner, ttl_millis)
+            .await?
+            .then(|| RecoveryLeaseFence {
+                name: name.to_owned(),
+                owner: owner.to_owned(),
+                epoch: 1,
+            }))
     }
 }
 
@@ -534,6 +613,14 @@ where
         (**self).update_transaction(tx).await
     }
 
+    async fn update_transaction_fenced(
+        &self,
+        tx: Transaction,
+        fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<()> {
+        (**self).update_transaction_fenced(tx, fence).await
+    }
+
     async fn register_branch(&self, gid: &str, branch: Branch) -> anyhow::Result<Transaction> {
         (**self).register_branch(gid, branch).await
     }
@@ -544,6 +631,17 @@ where
         progress: WorkflowProgress,
     ) -> anyhow::Result<Transaction> {
         (**self).record_workflow_progress(gid, progress).await
+    }
+
+    async fn record_workflow_progress_fenced(
+        &self,
+        gid: &str,
+        progress: WorkflowProgress,
+        fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<Transaction> {
+        (**self)
+            .record_workflow_progress_fenced(gid, progress, fence)
+            .await
     }
 
     async fn finish_workflow(
@@ -558,12 +656,36 @@ where
             .await
     }
 
+    async fn finish_workflow_fenced(
+        &self,
+        gid: &str,
+        status: TransactionStatus,
+        rollback_reason: Option<String>,
+        result: Option<String>,
+        fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<Transaction> {
+        (**self)
+            .finish_workflow_fenced(gid, status, rollback_reason, result, fence)
+            .await
+    }
+
     async fn defer_workflow_recovery(
         &self,
         gid: &str,
         delay: WorkflowRecoveryDelay,
     ) -> anyhow::Result<Transaction> {
         (**self).defer_workflow_recovery(gid, delay).await
+    }
+
+    async fn defer_workflow_recovery_fenced(
+        &self,
+        gid: &str,
+        delay: WorkflowRecoveryDelay,
+        fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<Transaction> {
+        (**self)
+            .defer_workflow_recovery_fenced(gid, delay, fence)
+            .await
     }
 
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>> {
@@ -600,8 +722,24 @@ where
         (**self).barrier(barrier).await
     }
 
+    async fn barrier_fenced(
+        &self,
+        barrier: BranchBarrier,
+        fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<BarrierDecision> {
+        (**self).barrier_fenced(barrier, fence).await
+    }
+
     async fn release_barrier(&self, barrier: &BranchBarrier) -> anyhow::Result<()> {
         (**self).release_barrier(barrier).await
+    }
+
+    async fn release_barrier_fenced(
+        &self,
+        barrier: &BranchBarrier,
+        fence: &RecoveryLeaseFence,
+    ) -> anyhow::Result<()> {
+        (**self).release_barrier_fenced(barrier, fence).await
     }
 
     async fn try_acquire_recovery_lease(
@@ -612,6 +750,151 @@ where
     ) -> anyhow::Result<bool> {
         (**self)
             .try_acquire_recovery_lease(name, owner, ttl_millis)
+            .await
+    }
+
+    async fn acquire_recovery_lease(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl_millis: u64,
+    ) -> anyhow::Result<Option<RecoveryLeaseFence>> {
+        (**self)
+            .acquire_recovery_lease(name, owner, ttl_millis)
+            .await
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RecoveryFencedStore<S> {
+    inner: S,
+    fence: RecoveryLeaseFence,
+}
+
+impl<S> RecoveryFencedStore<S> {
+    fn new(inner: S, fence: RecoveryLeaseFence) -> Self {
+        Self { inner, fence }
+    }
+}
+
+#[async_trait]
+impl<S> TransactionStore for RecoveryFencedStore<S>
+where
+    S: TransactionStore,
+{
+    async fn insert_transaction(&self, tx: Transaction) -> anyhow::Result<()> {
+        self.inner.insert_transaction(tx).await
+    }
+
+    async fn get_transaction(&self, gid: &str) -> anyhow::Result<Option<Transaction>> {
+        self.inner.get_transaction(gid).await
+    }
+
+    async fn update_transaction(&self, tx: Transaction) -> anyhow::Result<()> {
+        self.inner.update_transaction_fenced(tx, &self.fence).await
+    }
+
+    async fn register_branch(&self, gid: &str, branch: Branch) -> anyhow::Result<Transaction> {
+        self.inner.register_branch(gid, branch).await
+    }
+
+    async fn record_workflow_progress(
+        &self,
+        gid: &str,
+        progress: WorkflowProgress,
+    ) -> anyhow::Result<Transaction> {
+        self.inner
+            .record_workflow_progress_fenced(gid, progress, &self.fence)
+            .await
+    }
+
+    async fn finish_workflow(
+        &self,
+        gid: &str,
+        status: TransactionStatus,
+        rollback_reason: Option<String>,
+        result: Option<String>,
+    ) -> anyhow::Result<Transaction> {
+        self.inner
+            .finish_workflow_fenced(
+                gid,
+                status,
+                rollback_reason,
+                result,
+                &self.fence,
+            )
+            .await
+    }
+
+    async fn defer_workflow_recovery(
+        &self,
+        gid: &str,
+        delay: WorkflowRecoveryDelay,
+    ) -> anyhow::Result<Transaction> {
+        self.inner
+            .defer_workflow_recovery_fenced(gid, delay, &self.fence)
+            .await
+    }
+
+    async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>> {
+        self.inner.list_transactions().await
+    }
+
+    async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>> {
+        self.inner.get_kv(category, key).await
+    }
+
+    async fn list_kv(
+        &self,
+        category: Option<&str>,
+        key: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KvEntry>> {
+        self.inner.list_kv(category, key, offset, limit).await
+    }
+
+    async fn create_kv(&self, entry: KvEntry) -> anyhow::Result<bool> {
+        self.inner.create_kv(entry).await
+    }
+
+    async fn update_kv(&self, entry: KvEntry, expected_version: u64) -> anyhow::Result<bool> {
+        self.inner.update_kv(entry, expected_version).await
+    }
+
+    async fn delete_kv(&self, category: &str, key: &str) -> anyhow::Result<bool> {
+        self.inner.delete_kv(category, key).await
+    }
+
+    async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision> {
+        self.inner.barrier_fenced(barrier, &self.fence).await
+    }
+
+    async fn release_barrier(&self, barrier: &BranchBarrier) -> anyhow::Result<()> {
+        self.inner
+            .release_barrier_fenced(barrier, &self.fence)
+            .await
+    }
+
+    async fn try_acquire_recovery_lease(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl_millis: u64,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .try_acquire_recovery_lease(name, owner, ttl_millis)
+            .await
+    }
+
+    async fn acquire_recovery_lease(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl_millis: u64,
+    ) -> anyhow::Result<Option<RecoveryLeaseFence>> {
+        self.inner
+            .acquire_recovery_lease(name, owner, ttl_millis)
             .await
     }
 }
@@ -1115,7 +1398,7 @@ impl TransactionStore for InMemoryTransactionStore {
     }
 
     async fn update_transaction(&self, mut tx: Transaction) -> anyhow::Result<()> {
-        tx.updated_at_millis = current_millis();
+        bump_transaction_revision(&mut tx);
         self.txs.write().await.insert(tx.gid.clone(), tx);
         Ok(())
     }
@@ -1393,7 +1676,7 @@ impl TransactionStore for SqliteTransactionStore {
     }
 
     async fn update_transaction(&self, mut tx: Transaction) -> anyhow::Result<()> {
-        tx.updated_at_millis = current_millis();
+        bump_transaction_revision(&mut tx);
         let payload = serde_json::to_string(&tx)?;
         sqlx::query(
             r#"
@@ -1840,7 +2123,7 @@ impl TransactionStore for PostgresTransactionStore {
     }
 
     async fn update_transaction(&self, mut tx: Transaction) -> anyhow::Result<()> {
-        tx.updated_at_millis = current_millis();
+        bump_transaction_revision(&mut tx);
         let payload = serde_json::to_string(&tx)?;
         sqlx::query(
             r#"
@@ -2273,7 +2556,7 @@ impl TransactionStore for MySqlTransactionStore {
     }
 
     async fn update_transaction(&self, mut tx: Transaction) -> anyhow::Result<()> {
-        tx.updated_at_millis = current_millis();
+        bump_transaction_revision(&mut tx);
         let payload = serde_json::to_string(&tx)?;
         sqlx::query(
             r#"
@@ -2646,6 +2929,12 @@ where
         &self.store
     }
 
+    async fn persist_transaction(&self, transaction: &mut Transaction) -> anyhow::Result<()> {
+        self.store.update_transaction(transaction.clone()).await?;
+        transaction.revision = transaction.revision.saturating_add(1);
+        Ok(())
+    }
+
     pub async fn subscribe_topic(
         &self,
         topic: &str,
@@ -2669,6 +2958,9 @@ where
 
     pub async fn submit(&self, tx: Transaction) -> anyhow::Result<Transaction> {
         let mut tx = tx;
+        // The coordinator owns the persisted revision sequence. Do not allow a
+        // caller-supplied value to skip or saturate later compare-and-set writes.
+        tx.revision = 1;
         tx.options.validate()?;
         if tx.kind == TransactionKind::Message {
             self.expand_message_topics(&mut tx).await?;
@@ -2988,12 +3280,12 @@ where
                 ))
         {
             tx.status = TransactionStatus::Succeeding;
-            self.store.update_transaction(tx.clone()).await?;
+            self.persist_transaction(&mut tx).await?;
         } else if tx.kind == TransactionKind::Workflow
             && tx.status == TransactionStatus::Prepared
         {
             tx.status = TransactionStatus::Submitted;
-            self.store.update_transaction(tx.clone()).await?;
+            self.persist_transaction(&mut tx).await?;
         }
         Ok(tx)
     }
@@ -3044,7 +3336,7 @@ where
         for branch in &mut tx.branches {
             branch.next_retry_millis = None;
         }
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3068,7 +3360,7 @@ where
             .map(|retries| retries.saturating_add(1))
             .unwrap_or(1);
         tx.status = TransactionStatus::Succeeding;
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         for index in 0..tx.branches.len() {
             if tx.branches[index].status == BranchStatus::Succeeded {
                 continue;
@@ -3098,7 +3390,7 @@ where
                     if tx.branches[index].attempts < max_attempts {
                         tx.branches[index].status = BranchStatus::Failed;
                         self.store.release_barrier(&barrier).await?;
-                        self.store.update_transaction(tx.clone()).await?;
+                        self.persist_transaction(&mut tx).await?;
                         return Ok(tx);
                     }
                     tx.branches[index].status = BranchStatus::Compensating;
@@ -3108,14 +3400,14 @@ where
                             previous.status = BranchStatus::Compensating;
                         }
                     }
-                    self.store.update_transaction(tx.clone()).await?;
+                    self.persist_transaction(&mut tx).await?;
                     return self.abort_saga(gid).await;
                 }
             }
-            self.store.update_transaction(tx.clone()).await?;
+            self.persist_transaction(&mut tx).await?;
         }
         tx.status = TransactionStatus::Succeeded;
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3163,7 +3455,7 @@ where
                         {
                             branch.status = BranchStatus::Compensating;
                             self.store.release_barrier(&barrier).await?;
-                            self.store.update_transaction(tx.clone()).await?;
+                            self.persist_transaction(&mut tx).await?;
                             return Ok(tx);
                         }
                     }
@@ -3171,7 +3463,7 @@ where
                     branch.next_retry_millis = None;
                 }
                 BarrierDecision::SkipDuplicate => {
-                    self.store.update_transaction(tx.clone()).await?;
+                    self.persist_transaction(&mut tx).await?;
                     return Ok(tx);
                 }
                 BarrierDecision::SkipNullCompensation => {
@@ -3183,7 +3475,7 @@ where
             }
         }
         tx.status = TransactionStatus::Aborted;
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3229,7 +3521,7 @@ where
                             if branch.attempts >= max_attempts {
                                 tx.status = TransactionStatus::Aborting;
                             }
-                            self.store.update_transaction(tx.clone()).await?;
+                            self.persist_transaction(&mut tx).await?;
                             return Ok(tx);
                         }
                     }
@@ -3238,7 +3530,7 @@ where
                     branch.status = BranchStatus::Skipped;
                     branch.next_retry_millis = None;
                     tx.status = TransactionStatus::Aborting;
-                    self.store.update_transaction(tx.clone()).await?;
+                    self.persist_transaction(&mut tx).await?;
                     return Ok(tx);
                 }
                 BarrierDecision::SkipDuplicate => {}
@@ -3248,7 +3540,7 @@ where
             }
         }
         tx.status = TransactionStatus::Prepared;
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3287,14 +3579,14 @@ where
                     Err(_) => {
                         branch.status = BranchStatus::Failed;
                         self.store.release_barrier(&barrier).await?;
-                        self.store.update_transaction(tx.clone()).await?;
+                        self.persist_transaction(&mut tx).await?;
                         return Ok(tx);
                     }
                 }
             }
         }
         tx.status = TransactionStatus::Succeeded;
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3342,7 +3634,7 @@ where
                         Err(_) => {
                             branch.status = BranchStatus::Failed;
                             self.store.release_barrier(&barrier).await?;
-                            self.store.update_transaction(tx.clone()).await?;
+                            self.persist_transaction(&mut tx).await?;
                             return Ok(tx);
                         }
                     }
@@ -3358,7 +3650,7 @@ where
             }
         }
         tx.status = TransactionStatus::Aborted;
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3371,7 +3663,7 @@ where
         }
         ensure_status(&tx, &[TransactionStatus::Submitted])?;
         tx.status = TransactionStatus::Prepared;
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3384,7 +3676,7 @@ where
         }
         ensure_status(&tx, &[TransactionStatus::Submitted])?;
         tx.status = TransactionStatus::Prepared;
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3445,12 +3737,12 @@ where
                 tx.branches[index].status = BranchStatus::Failed;
                 tx.status = TransactionStatus::Aborting;
                 self.store.release_barrier(&barrier).await?;
-                self.store.update_transaction(tx.clone()).await?;
+                self.persist_transaction(&mut tx).await?;
                 return self.abort_workflow(gid).await;
             }
             tx.branches[index].status = BranchStatus::Succeeded;
             tx.branches[index].next_retry_millis = None;
-            self.store.update_transaction(tx.clone()).await?;
+            self.persist_transaction(&mut tx).await?;
         }
         if tx
             .branches
@@ -3458,7 +3750,7 @@ where
             .all(|branch| branch.status == BranchStatus::Succeeded)
         {
             tx.status = TransactionStatus::Succeeded;
-            self.store.update_transaction(tx.clone()).await?;
+            self.persist_transaction(&mut tx).await?;
             return Ok(tx);
         }
         anyhow::bail!("workflow {} has unresolved or cyclic dependencies", tx.gid)
@@ -3502,7 +3794,7 @@ where
                 {
                     branch.status = BranchStatus::Compensating;
                     self.store.release_barrier(&barrier).await?;
-                    self.store.update_transaction(tx.clone()).await?;
+                    self.persist_transaction(&mut tx).await?;
                     return Ok(tx);
                 }
             }
@@ -3510,7 +3802,7 @@ where
             branch.next_retry_millis = None;
         }
         tx.status = TransactionStatus::Aborted;
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3547,7 +3839,7 @@ where
                 {
                     branch.status = BranchStatus::Failed;
                     self.store.release_barrier(&barrier).await?;
-                    self.store.update_transaction(tx.clone()).await?;
+                    self.persist_transaction(&mut tx).await?;
                     return Ok(tx);
                 }
                 branch.status = BranchStatus::Succeeded;
@@ -3555,7 +3847,7 @@ where
             }
         }
         tx.status = TransactionStatus::Succeeded;
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3575,7 +3867,7 @@ where
             branch.status = BranchStatus::Skipped;
             branch.next_retry_millis = None;
         }
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3586,7 +3878,7 @@ where
         }
         ensure_status(&tx, &[TransactionStatus::Submitted])?;
         tx.status = TransactionStatus::Prepared;
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3617,7 +3909,7 @@ where
                 {
                     branch.status = BranchStatus::Failed;
                     self.store.release_barrier(&barrier).await?;
-                    self.store.update_transaction(tx.clone()).await?;
+                    self.persist_transaction(&mut tx).await?;
                     return Ok(tx);
                 }
                 branch.status = BranchStatus::Succeeded;
@@ -3625,7 +3917,7 @@ where
             }
         }
         tx.status = TransactionStatus::Succeeded;
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3661,7 +3953,7 @@ where
                 {
                     branch.status = BranchStatus::Failed;
                     self.store.release_barrier(&barrier).await?;
-                    self.store.update_transaction(tx.clone()).await?;
+                    self.persist_transaction(&mut tx).await?;
                     return Ok(tx);
                 }
                 branch.status = BranchStatus::Skipped;
@@ -3669,7 +3961,7 @@ where
             }
         }
         tx.status = TransactionStatus::Aborted;
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3703,7 +3995,7 @@ where
         for branch in &mut tx.branches {
             branch.next_retry_millis = None;
         }
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3731,7 +4023,7 @@ where
                 "manual_reset".to_owned(),
             );
         }
-        self.store.update_transaction(tx.clone()).await?;
+        self.persist_transaction(&mut tx).await?;
         Ok(tx)
     }
 
@@ -3923,15 +4215,23 @@ where
         &self,
         owner: &str,
         ttl_millis: u64,
-    ) -> anyhow::Result<Vec<Transaction>> {
-        if !self
+    ) -> anyhow::Result<Vec<Transaction>>
+    where
+        S: Clone,
+    {
+        let Some(fence) = self
             .store
-            .try_acquire_recovery_lease("roze-dtm-recovery", owner, ttl_millis)
+            .acquire_recovery_lease("roze-dtm-recovery", owner, ttl_millis)
             .await?
-        {
+        else {
             return Ok(Vec::new());
-        }
-        self.tick_recover_once().await
+        };
+        let recovering = Dtm {
+            store: RecoveryFencedStore::new(self.store.clone(), fence),
+            invoker: self.invoker.clone(),
+            options: self.options,
+        };
+        recovering.tick_recover_once().await
     }
 
     fn max_attempts(&self, options: &TransactionOptions) -> u32 {
@@ -4006,7 +4306,7 @@ fn append_dynamic_branch(tx: &mut Transaction, branch: Branch) -> anyhow::Result
         return Ok(());
     }
     tx.branches.push(branch);
-    tx.updated_at_millis = current_millis();
+    bump_transaction_revision(tx);
     Ok(())
 }
 
@@ -4077,7 +4377,7 @@ fn append_workflow_progress(
         "workflow progress data exceeds 2 MiB in total"
     );
     tx.workflow_progresses.push(progress);
-    tx.updated_at_millis = current_millis();
+    bump_transaction_revision(tx);
     Ok(())
 }
 
@@ -4135,7 +4435,7 @@ fn apply_workflow_completion(
     } else {
         tx.metadata.insert("dtm.workflow.result".to_owned(), result);
     }
-    tx.updated_at_millis = current_millis();
+    bump_transaction_revision(tx);
     Ok(())
 }
 
@@ -4176,7 +4476,7 @@ fn defer_workflow_recovery(
     );
     tx.metadata
         .insert("dtm.callback.last_outcome".to_owned(), delay.outcome);
-    tx.updated_at_millis = current_millis();
+    bump_transaction_revision(tx);
     Ok(())
 }
 
@@ -4360,6 +4660,11 @@ fn current_millis() -> u64 {
     }
 }
 
+fn bump_transaction_revision(transaction: &mut Transaction) {
+    transaction.revision = transaction.revision.saturating_add(1);
+    transaction.updated_at_millis = current_millis();
+}
+
 async fn insert_barrier(
     transaction: &mut sqlx::Transaction<'_, Sqlite>,
     key: &str,
@@ -4427,6 +4732,40 @@ mod tests {
             Arc, Mutex,
         },
     };
+
+    #[test]
+    fn transaction_revision_is_monotonic_and_legacy_records_start_at_zero() {
+        let mut transaction = Transaction::tcc("revision", Vec::new());
+        assert_eq!(transaction.revision, 1);
+        let mut legacy = serde_json::to_value(&transaction).expect("serialize transaction");
+        legacy
+            .as_object_mut()
+            .expect("transaction object")
+            .remove("revision");
+        let mut legacy: Transaction =
+            serde_json::from_value(legacy).expect("deserialize legacy transaction");
+        assert_eq!(legacy.revision, 0);
+        bump_transaction_revision(&mut legacy);
+        assert_eq!(legacy.revision, 1);
+    }
+
+    #[tokio::test]
+    async fn submit_normalizes_caller_supplied_revision() {
+        let store = InMemoryTransactionStore::new();
+        let dtm = Dtm::new(store.clone());
+        let mut transaction = Transaction::tcc("revision-submit", Vec::new());
+        transaction.revision = u64::MAX;
+
+        let submitted = dtm.submit(transaction).await.expect("submit transaction");
+        let stored = store
+            .get_transaction("revision-submit")
+            .await
+            .expect("read transaction")
+            .expect("stored transaction");
+
+        assert_eq!(submitted.revision, 1);
+        assert_eq!(stored.revision, 1);
+    }
 
     #[derive(Clone)]
     struct FailingOnceInvoker {
@@ -5409,14 +5748,19 @@ mod tests {
     async fn recovery_lease_allows_one_owner_until_expired() {
         let store = InMemoryTransactionStore::new();
 
+        let fence = store
+            .acquire_recovery_lease("recovery", "worker-a", 10_000)
+            .await
+            .expect("lease")
+            .expect("lease acquired");
+        assert_eq!(fence.name, "recovery");
+        assert_eq!(fence.owner, "worker-a");
+        assert_eq!(fence.epoch, 1);
         assert!(store
-            .try_acquire_recovery_lease("recovery", "worker-a", 10_000)
+            .acquire_recovery_lease("recovery", "worker-b", 10_000)
             .await
-            .expect("lease"));
-        assert!(!store
-            .try_acquire_recovery_lease("recovery", "worker-b", 10_000)
-            .await
-            .expect("lease"));
+            .expect("lease")
+            .is_none());
         assert!(store
             .try_acquire_recovery_lease("recovery", "worker-a", 10_000)
             .await

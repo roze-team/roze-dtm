@@ -39,7 +39,7 @@ callback 使用对应的 `http://` 或 `https://` origin 加入同一白名单�
 
 生产环境禁止 `store.kind: memory`。持久化后端支持 `sqlite`、`postgres`、`mysql` 和 `redis`；数据库 URL scheme 必须与 kind 一致，`max_connections` 范围为 1–1000。Redis standalone 使用 `redis_url`，Cluster 使用一个或多个 `redis_cluster_urls`，两者仅接受 `redis://` 或 `rediss://`；Cluster 配置优先。`redis_namespace` 只允许 1–64 个 ASCII 字母、数字、`-`、`_`，用于构造显式 hash tag，禁止部署间共享命名空间。`redis_operation_timeout_ms` 范围为 1–120000，默认 5000，同时限制建连和每次 Redis 命令。`control_token` 至少 32 字节；`worker_id` 必须在同一部署中唯一。恢复租约时长至少是恢复周期的两倍。配置文件只保存 `env://` 引用，不保存明文密钥。
 
-Redis 生产配置示例见 `service/config.redis.production.yaml`。Redis 后端将事务、KV、屏障和租约分为四个 Hash；Lua CAS、屏障决策和租约获取每次只访问一个 key，兼容 standalone 和 Cluster。事务扫描使用有界分批 `HSCAN`，租约到期判断使用 Redis 服务端时间。当前仍需在禁编译窗口结束后执行真实 standalone/Cluster 故障测试，并为长耗时恢复补齐写入 fencing 后，才能声明完整的多节点故障隔离证据。
+Redis 生产配置示例见 `service/config.redis.production.yaml`。Redis 后端将事务、KV、屏障和租约分为四个 Hash，全部 key 共享显式 Cluster hash tag。租约脚本使用 Redis 服务端时间；首次获取或过期后重新获取会递增 epoch，同一 owner 在有效期内续租复用 epoch。恢复 worker 通过 fenced store 推进，事务 revision/payload CAS、Workflow 变更、屏障创建和释放均在同一 Lua 调用中校验 owner、epoch 与过期时间。事务扫描使用有界分批 `HSCAN`。当前仍需在禁编译窗口结束后执行真实 standalone/Cluster、过期接管和长耗时恢复故障测试，才能声明完整的多节点故障隔离证据。
 
 除健康、启动、就绪和指标接口外，所有 `/v1/**` 请求必须携带：
 
@@ -163,4 +163,4 @@ MySQL 使用 `XA START/END/PREPARE/COMMIT/ROLLBACK`，PostgreSQL 使用 `BEGIN/P
 
 ## 当前边界
 
-已支持内存、SQLite、PostgreSQL、MySQL 与 Redis 存储，Saga、TCC、静态及 callback Workflow、二阶段消息和 XA 协调状态机，MySQL/PostgreSQL XA 资源管理器、资源侧启发式决策持久化与 prepared 对账，HTTP 分支调用、超时、重试、分支屏障、持久化恢复租约、版本化 KV、topic 订阅、自动恢复 worker、callback Workflow 的 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复、原生 Roze HTTP/gRPC 控制面、脱敏 Dashboard 和审计事件。Redis fencing、其他语言 SDK 与 Dashboard 审计时间线仍属于后续扩展；XA、Redis、gRPC 适配器及 callback 恢复仍需完成编译、真实依赖、跨语言互操作和故障注入验证。
+已支持内存、SQLite、PostgreSQL、MySQL 与 Redis 存储，Saga、TCC、静态及 callback Workflow、二阶段消息和 XA 协调状态机，MySQL/PostgreSQL XA 资源管理器、资源侧启发式决策持久化与 prepared 对账，HTTP 分支调用、超时、重试、分支屏障、持久化恢复租约、Redis 恢复写入 fencing、版本化 KV、topic 订阅、自动恢复 worker、callback Workflow 的 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复、原生 Roze HTTP/gRPC 控制面、脱敏 Dashboard 和审计事件。其他语言 SDK 与 Dashboard 审计时间线仍属于后续扩展；XA、Redis、gRPC 适配器及 callback 恢复仍需完成编译、真实依赖、跨语言互操作和故障注入验证。

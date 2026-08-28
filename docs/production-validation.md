@@ -24,9 +24,11 @@ bash scripts/redis-integration.sh
 - KV 版本竞争、topic 订阅并发更新。
 - 建连和命令超过 `redis_operation_timeout_ms` 时有界失败，恢复 worker 可在后续周期重试。
 - 两个 worker 的租约竞争、续租、过期接管和 Redis 服务端时间语义。
+- 同一 owner 过期后重新获取产生新 epoch，旧 epoch 的事务 CAS、Workflow 更新、屏障创建和屏障释放全部失败闭合。
+- 普通控制面写入与恢复写入并发时，stale transaction revision 被拒绝且动态分支不会被静默覆盖。
 - Cluster MOVED/ASK、节点重启、主从切换、断连恢复及同槽脚本行为。
 
-当前状态：测试入口和 ignored integration tests 已加入，但受当前禁编译要求约束，本提交没有执行 Cargo 测试，也没有形成真实 Redis 或长时间运行证据。写入 fencing 尚未完成，因此 Redis 后端不能据此宣称完成多节点生产验证。
+当前状态：服务端时间 + epoch 租约、恢复 fenced store、事务 revision/payload CAS、Workflow/屏障 fenced Lua 和 ignored integration tests 已加入源码。受当前禁编译要求约束，本提交没有执行 Cargo 测试，也没有形成真实 Redis、主从切换或长时间运行证据，因此 Redis 后端仍不能据此宣称完成多节点生产验证，状态保持 `inconclusive`。
 
 ## 协议互操作
 
