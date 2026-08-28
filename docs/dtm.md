@@ -110,6 +110,8 @@ Dashboard API 使用同一组过滤和分页边界，但只返回管理摘要字
 
 原生 HTTP API 的逐事务选项使用毫秒。`request_timeout_millis` 覆盖该事务的单次 HTTP 分支调用超时；`retry_interval_millis` 是有上限指数退避的初始间隔；`retry_limit` 表示额外重试次数，Saga 在耗尽后才进入补偿，TCC Try 使用同一总尝试次数边界；`branch_headers` 会在 URL 白名单再次校验后发送给分支。Header 最多 32 个，名称和值分别不超过 64 和 1024 字节，并必须是合法 HTTP Header。
 
+Message 可设置 `options.delay_millis`，从事务持久化的创建时间开始计算投递点。Dispatch 会先保存提交决策，到期前保持 `Succeeding` 且不调用分支；服务重启后由恢复 worker 在同一绝对时间继续投递。该字段只允许 Message 使用，范围为 1 毫秒至 365 天。
+
 ## Saga 请求
 
 ```json
@@ -154,7 +156,7 @@ MySQL 使用 `XA START/END/PREPARE/COMMIT/ROLLBACK`，PostgreSQL 使用 `BEGIN/P
 - 分支 URL 最长 2048 字节，只接受 `http://` 或 `https://`。
 - metadata 最多 32 项；键最长 64 字节，值最长 256 字节。
 - `timeout_millis` 范围为 1 秒至 24 小时。
-- 逐事务重试和请求超时范围为 1 毫秒至 24 小时，重试次数不超过 10000。
+- 逐事务重试和请求超时范围为 1 毫秒至 24 小时，重试次数不超过 10000；Message 延迟范围为 1 毫秒至 365 天。
 - 原生 JSON 提取器默认限制请求体为 2 MiB。
 
 ## 状态恢复与屏障

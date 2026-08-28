@@ -1893,6 +1893,15 @@
             "default": false,
             "description": "Run Saga branches by dependency-ready concurrent layers"
           },
+          "delay_millis": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 31536000000,
+            "description": "Message-only delivery delay from transaction creation time"
+          },
           "retry_interval_millis": {
             "type": [
               "integer",
@@ -2333,7 +2342,7 @@
               "string",
               "null"
             ],
-            "description": "Opaque upstream data; Saga concurrent/orders objects map to the execution DAG"
+            "description": "Opaque upstream data; Saga concurrent/orders maps to the execution DAG and Message delay is measured in seconds"
           },
           "query_prepared": {
             "type": [

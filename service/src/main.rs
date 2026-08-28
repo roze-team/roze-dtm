@@ -562,6 +562,12 @@ struct CompatSagaCustom {
     orders: BTreeMap<usize, Vec<usize>>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct CompatMessageCustom {
+    delay: u64,
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum CompatProtocol {
     #[default]
@@ -1747,8 +1753,39 @@ fn compat_transaction(
     transaction.options = compat_transaction_options(request)?;
     if kind == TransactionKind::Saga {
         apply_compat_saga_custom(&mut transaction, request)?;
+    } else if kind == TransactionKind::Message {
+        apply_compat_message_custom(&mut transaction, request)?;
     }
     Ok(transaction)
+}
+
+fn apply_compat_message_custom(
+    transaction: &mut Transaction,
+    request: &CompatTransactionRequest,
+) -> anyhow::Result<()> {
+    let Some(custom_data) = request
+        .custom_data
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let value: serde_json::Value = serde_json::from_str(custom_data)
+        .context("Message custom_data must be valid JSON")?;
+    if value.get("delay").is_none() {
+        return Ok(());
+    }
+    let custom: CompatMessageCustom = serde_json::from_value(value)
+        .context("Message custom_data.delay must be a non-negative integer")?;
+    if custom.delay > 0 {
+        transaction.options.delay_millis = Some(
+            custom
+                .delay
+                .checked_mul(1_000)
+                .context("Message delay exceeds the supported range")?,
+        );
+    }
+    Ok(())
 }
 
 fn apply_compat_saga_custom(
@@ -1799,6 +1836,7 @@ fn compat_transaction_options(
     let options = TransactionOptions {
         wait_result: request.wait_result,
         concurrent: false,
+        delay_millis: None,
         retry_interval_millis: request
             .retry_interval
             .map(|seconds| seconds.saturating_mul(1_000)),
@@ -2229,11 +2267,7 @@ fn build_dashboard_snapshot(
         } else {
             summary.active += 1;
         }
-        if transaction
-            .branches
-            .iter()
-            .any(|branch| branch.next_retry_millis.is_some())
-        {
+        if dashboard_next_retry_millis(transaction).is_some() {
             summary.retry_scheduled += 1;
         }
     }
@@ -2298,11 +2332,7 @@ impl From<Transaction> for DashboardTransactionRow {
             .iter()
             .map(|branch| u64::from(branch.attempts))
             .sum();
-        let next_retry_millis = transaction
-            .branches
-            .iter()
-            .filter_map(|branch| branch.next_retry_millis)
-            .min();
+        let next_retry_millis = dashboard_next_retry_millis(&transaction);
         let xa_reconciliation_state = xa_reconciliation_state(&transaction).map(str::to_owned);
         Self {
             gid: transaction.gid,
@@ -2319,6 +2349,30 @@ impl From<Transaction> for DashboardTransactionRow {
             terminal: transaction.status.is_terminal(),
             xa_reconciliation_state,
         }
+    }
+}
+
+fn dashboard_next_retry_millis(transaction: &Transaction) -> Option<u64> {
+    let branch_retry = transaction
+        .branches
+        .iter()
+        .filter_map(|branch| branch.next_retry_millis)
+        .min();
+    let message_delivery = (transaction.kind == TransactionKind::Message
+        && transaction.status == TransactionStatus::Succeeding
+        && transaction.branches.iter().all(|branch| branch.attempts == 0))
+    .then(|| {
+        transaction
+            .options
+            .delay_millis
+            .map(|delay| transaction.created_at_millis.saturating_add(delay))
+    })
+    .flatten();
+    match (branch_retry, message_delivery) {
+        (Some(branch), Some(delivery)) => Some(branch.min(delivery)),
+        (Some(branch), None) => Some(branch),
+        (None, Some(delivery)) => Some(delivery),
+        (None, None) => None,
     }
 }
 
@@ -2439,6 +2493,9 @@ fn build_transaction(
     transaction.metadata = request.metadata;
     if request.options.validate().is_err() {
         return Err("transaction options are invalid");
+    }
+    if kind != TransactionKind::Message && request.options.delay_millis.is_some() {
+        return Err("delay_millis is only supported by Message transactions");
     }
     transaction.options = request.options;
     if validate_saga_dependencies(&transaction).is_err() {
@@ -2952,6 +3009,28 @@ mod tests {
     }
 
     #[test]
+    fn compat_message_custom_data_maps_delay_seconds() {
+        let request = CompatTransactionRequest {
+            gid: "message-delay".to_owned(),
+            trans_type: "msg".to_owned(),
+            steps: vec![[
+                ("action".to_owned(), "http://events/publish".to_owned()),
+            ]
+            .into_iter()
+            .collect()],
+            payloads: vec![serde_json::json!({})],
+            custom_data: Some(r#"{"delay":10}"#.to_owned()),
+            ..CompatTransactionRequest::default()
+        };
+        let policy = BranchUrlPolicy::from_allowed_origins(["http://events"])
+            .expect("branch policy");
+        let transaction = compat_transaction(TransactionKind::Message, &request, &policy)
+            .expect("delayed Message compatibility request");
+
+        assert_eq!(transaction.options.delay_millis, Some(10_000));
+    }
+
+    #[test]
     fn callback_workflow_completion_uses_req_extra_contract() {
         let request = CompatTransactionRequest {
             gid: "workflow-1".to_owned(),
@@ -3113,6 +3192,31 @@ mod tests {
         ] {
             assert!(!wire.contains(sensitive));
         }
+    }
+
+    #[test]
+    fn dashboard_exposes_delayed_message_delivery_as_scheduled_work() {
+        let mut transaction = Transaction::message(
+            "dashboard-delayed-message",
+            vec![Branch::message(
+                "publish",
+                "http://events/publish",
+                serde_json::json!({}),
+            )],
+        );
+        transaction.status = TransactionStatus::Succeeding;
+        transaction.options.delay_millis = Some(10_000);
+        let expected = transaction.created_at_millis + 10_000;
+
+        let snapshot = build_dashboard_snapshot(
+            vec![transaction],
+            TransactionQuery::default(),
+            Vec::new(),
+        )
+        .expect("delayed Message dashboard snapshot");
+
+        assert_eq!(snapshot.summary.retry_scheduled, 1);
+        assert_eq!(snapshot.transactions.items[0].next_retry_millis, Some(expected));
     }
 
     #[test]

@@ -118,6 +118,8 @@ Dashboard 数据不包含分支 URL、请求载荷、Header、metadata、Workflo
 
 Saga 默认保持声明顺序；设置 `options.concurrent: true` 后，所有前置依赖已成功的分支按层并发执行。失败时仅补偿已经成功的分支，并按依赖反向分层并发补偿。未知、重复、自依赖或成环依赖会在持久化前拒绝。dtm-labs 兼容入口同时解析 `custom_data` 中的 `concurrent` 与零基 `orders`。
 
+Message 支持原生 `options.delay_millis` 延迟投递；显式 Dispatch/Submit 决策会先持久化为 `Succeeding`，到达“创建时间 + 延迟”前不会调用分支，恢复 worker 按该时间唤醒。dtm-labs 兼容入口解析 `custom_data: {"delay": 10}`，其中上游单位为秒。
+
 ## XA Resource Manager
 
 `roze_dtm::xa` 提供 MySQL 与 PostgreSQL 的 Rust 原生 XA 资源管理器。它在同一物理数据库连接中依次执行 XA/本地事务启动、`roze_xa_barriers` 幂等屏障、业务闭包、DTM 分支注册与 Prepare；注册或业务执行失败时失败闭合并回滚。二阶段接口提供 Commit/Rollback、重复 phase-2 的 `AlreadyResolved` 结果以及 prepared transaction 恢复扫描。`DtmHttpClient::xa_global_transaction` 对全局 Prepare、业务闭包和最终 Commit/Rollback 决策进行封装。

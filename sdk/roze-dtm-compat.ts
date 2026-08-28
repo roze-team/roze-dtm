@@ -39,6 +39,13 @@ export function concurrentSagaCustomData(orders: Record<number, number[]> = {}):
   return JSON.stringify({ orders, concurrent: true });
 }
 
+export function messageDelayCustomData(delaySeconds: number): string {
+  if (!Number.isSafeInteger(delaySeconds) || delaySeconds <= 0 || delaySeconds > 31_536_000) {
+    throw new TypeError("Message delay must be an integer between 1 and 31536000 seconds");
+  }
+  return JSON.stringify({ delay: delaySeconds });
+}
+
 export class RozeDtmJsonRpcError extends Error {
   constructor(public readonly code: number, message: string, public readonly id: JsonValue) { super(message); this.name = "RozeDtmJsonRpcError"; }
 }

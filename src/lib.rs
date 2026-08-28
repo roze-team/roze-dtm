@@ -392,6 +392,12 @@ pub struct TransactionOptions {
     /// branch that must succeed before the dependent branch can run.
     #[serde(default)]
     pub concurrent: bool,
+    /// Defers Message branch delivery from the transaction creation time.
+    ///
+    /// This is the native millisecond form of dtm-labs Message
+    /// `custom_data.delay`, whose compatibility wire unit is seconds.
+    #[serde(default)]
+    pub delay_millis: Option<u64>,
     #[serde(default)]
     pub retry_interval_millis: Option<u64>,
     #[serde(default)]
@@ -404,6 +410,12 @@ pub struct TransactionOptions {
 
 impl TransactionOptions {
     pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(value) = self.delay_millis {
+            anyhow::ensure!(
+                (1..=31_536_000_000).contains(&value),
+                "message delay must be between 1 and 31536000000 milliseconds"
+            );
+        }
         if let Some(value) = self.retry_interval_millis {
             anyhow::ensure!(
                 (1..=86_400_000).contains(&value),
@@ -2987,6 +2999,10 @@ where
         // caller-supplied value to skip or saturate later compare-and-set writes.
         tx.revision = 1;
         tx.options.validate()?;
+        anyhow::ensure!(
+            tx.kind == TransactionKind::Message || tx.options.delay_millis.is_none(),
+            "delay_millis is only supported by Message transactions"
+        );
         validate_saga_dependencies(&tx)?;
         if tx.kind == TransactionKind::Message {
             self.expand_message_topics(&mut tx).await?;
@@ -4117,8 +4133,17 @@ where
                 TransactionStatus::Succeeding,
             ],
         )?;
+        if tx.status != TransactionStatus::Succeeding {
+            // Persist the submit decision before waiting or performing branch
+            // I/O, so recovery never has to guess whether a Prepared Message
+            // was committed by its caller.
+            tx.status = TransactionStatus::Succeeding;
+            self.persist_transaction(&mut tx).await?;
+        }
+        if !message_dispatch_due(&tx, current_millis()) {
+            return Ok(tx);
+        }
         let execution_options = tx.options.clone();
-        tx.status = TransactionStatus::Succeeding;
         for branch in &mut tx.branches {
             if branch.status == BranchStatus::Succeeded {
                 continue;
@@ -4385,6 +4410,12 @@ where
         if tx.status.is_terminal() {
             return Ok(tx);
         }
+        if tx.kind == TransactionKind::Message
+            && tx.status == TransactionStatus::Succeeding
+            && !message_dispatch_due(&tx, current_millis())
+        {
+            return Ok(tx);
+        }
         if is_expired(&tx, current_millis()) {
             return match tx.kind {
                 TransactionKind::Tcc => self.cancel_tcc(gid).await,
@@ -4453,6 +4484,12 @@ where
         let now = current_millis();
         for tx in self.store.list_transactions().await? {
             if tx.status.is_terminal() {
+                continue;
+            }
+            if tx.kind == TransactionKind::Message
+                && tx.status == TransactionStatus::Succeeding
+                && !message_dispatch_due(&tx, now)
+            {
                 continue;
             }
             if is_expired(&tx, now) {
@@ -5020,7 +5057,14 @@ fn transaction_next_recovery_millis(tx: &Transaction) -> Option<u64> {
             .and_then(|value| value.parse::<u64>().ok());
     }
 
-    let mut next = None;
+    let mut next = if tx.kind == TransactionKind::Message
+        && tx.status == TransactionStatus::Succeeding
+        && tx.branches.iter().all(|branch| branch.attempts == 0)
+    {
+        message_dispatch_at_millis(tx)
+    } else {
+        None
+    };
     for branch in tx.branches.iter().filter(|branch| {
         matches!(
             branch.status,
@@ -5157,6 +5201,12 @@ fn record_branch_failure(
 }
 
 fn transaction_due(tx: &Transaction, now: u64) -> bool {
+    if tx.kind == TransactionKind::Message
+        && tx.status == TransactionStatus::Succeeding
+        && !message_dispatch_due(tx, now)
+    {
+        return false;
+    }
     tx.branches
         .iter()
         .filter(|branch| {
@@ -5166,6 +5216,16 @@ fn transaction_due(tx: &Transaction, now: u64) -> bool {
             )
         })
         .all(|branch| branch.next_retry_millis.is_none_or(|next| next <= now))
+}
+
+fn message_dispatch_at_millis(tx: &Transaction) -> Option<u64> {
+    tx.options
+        .delay_millis
+        .map(|delay| tx.created_at_millis.saturating_add(delay))
+}
+
+fn message_dispatch_due(tx: &Transaction, now: u64) -> bool {
+    message_dispatch_at_millis(tx).is_none_or(|dispatch_at| dispatch_at <= now)
 }
 
 fn is_expired(tx: &Transaction, now: u64) -> bool {
@@ -5226,6 +5286,11 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct CountingInvoker {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Clone)]
     struct FailOnCallInvoker {
         calls: Arc<AtomicUsize>,
         fail_on: usize,
@@ -5263,6 +5328,14 @@ mod tests {
             if calls == 0 {
                 anyhow::bail!("temporary failure");
             }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl BranchInvoker for CountingInvoker {
+        async fn invoke(&self, _url: &str, _payload: &serde_json::Value) -> anyhow::Result<()> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -6566,6 +6639,84 @@ mod tests {
                 .status,
             TransactionStatus::Succeeded
         );
+    }
+
+    #[tokio::test]
+    async fn delayed_message_persists_submit_decision_without_early_delivery() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let store = InMemoryTransactionStore::new();
+        let dtm = Dtm::with_invoker(
+            store.clone(),
+            CountingInvoker {
+                calls: Arc::clone(&calls),
+            },
+        );
+        let mut message = Transaction::message(
+            "gid-message-delay",
+            vec![Branch::message(
+                "publish",
+                "http://events/publish",
+                serde_json::json!({}),
+            )],
+        );
+        message.options.delay_millis = Some(60_000);
+        let dispatch_at = message.created_at_millis + 60_000;
+        dtm.submit(message).await.expect("submit delayed message");
+
+        let delayed = dtm
+            .dispatch_message("gid-message-delay")
+            .await
+            .expect("persist delayed dispatch decision");
+
+        assert_eq!(delayed.status, TransactionStatus::Succeeding);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(dtm
+            .tick_recover_once()
+            .await
+            .expect("skip early delayed recovery")
+            .is_empty());
+        assert_eq!(transaction_next_recovery_millis(&delayed), Some(dispatch_at));
+        assert!(!transaction_due(&delayed, dispatch_at - 1));
+        assert!(transaction_due(&delayed, dispatch_at));
+        assert_eq!(
+            store
+                .get_transaction("gid-message-delay")
+                .await
+                .expect("read delayed message")
+                .expect("delayed message exists")
+                .status,
+            TransactionStatus::Succeeding
+        );
+    }
+
+    #[tokio::test]
+    async fn elapsed_message_delay_dispatches_normally() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dtm = Dtm::with_invoker(
+            InMemoryTransactionStore::new(),
+            CountingInvoker {
+                calls: Arc::clone(&calls),
+            },
+        );
+        let mut message = Transaction::message(
+            "gid-message-delay-elapsed",
+            vec![Branch::message(
+                "publish",
+                "http://events/publish",
+                serde_json::json!({}),
+            )],
+        );
+        message.created_at_millis = 0;
+        message.options.delay_millis = Some(1);
+        dtm.submit(message).await.expect("submit elapsed delayed message");
+
+        let dispatched = dtm
+            .dispatch_message("gid-message-delay-elapsed")
+            .await
+            .expect("dispatch elapsed delayed message");
+
+        assert_eq!(dispatched.status, TransactionStatus::Succeeded);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

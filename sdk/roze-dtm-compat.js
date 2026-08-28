@@ -11,6 +11,13 @@ export function concurrentSagaCustomData(orders = {}) {
   return JSON.stringify({ orders, concurrent: true });
 }
 
+export function messageDelayCustomData(delaySeconds) {
+  if (!Number.isSafeInteger(delaySeconds) || delaySeconds <= 0 || delaySeconds > 31_536_000) {
+    throw new TypeError("Message delay must be an integer between 1 and 31536000 seconds");
+  }
+  return JSON.stringify({ delay: delaySeconds });
+}
+
 export class RozeDtmJsonRpcError extends Error {
   constructor(code, message, id) { super(message); this.name = "RozeDtmJsonRpcError"; this.code = code; this.id = id; }
 }
