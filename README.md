@@ -30,6 +30,20 @@ python scripts/generate-openapi.py
 python scripts/validate-openapi.py
 ```
 
+对已经部署的生产候选服务执行只读合同烟测时，必须显式提供完整 Git revision、控制令牌、部署拓扑和证据目录：
+
+```bash
+ROZE_DTM_BASE_URL=https://dtm.example.com \
+ROZE_DTM_CONTROL_TOKEN='env-secret' \
+ROZE_DTM_EXPECTED_REVISION=0123456789abcdef0123456789abcdef01234567 \
+ROZE_DTM_EVIDENCE_DIR=target/dtm-http-evidence \
+ROZE_DTM_TOPOLOGY_JSON='{"store":"postgres","replica_count":2,"dependencies":["postgres"]}' \
+node scripts/production-http-contract-smoke.mjs
+python scripts/validate-production-evidence.py target/dtm-http-evidence/http-contract-report.json
+```
+
+该烟测不会创建事务，只读取探针、指标、OpenAPI、统计、Dashboard、XA 对账，并调用无持久副作用的 HTTP/JSON-RPC GID 生成。报告不记录令牌；OpenAPI 和指标快照使用 SHA-256 绑定，任何缺失或篡改都会被独立校验器拒绝。
+
 设置以下变量后，工作区测试还会执行真实关系型数据库契约测试：
 
 ```bash
