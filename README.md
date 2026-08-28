@@ -7,6 +7,7 @@ Roze 的独立分布式事务协调器，默认提供 TCC，并支持 Saga 工�
 - `src/lib.rs`：DTM 核心库，包含 TCC、Saga、Workflow、二阶段消息与 XA 状态机，以及内存、SQLite、PostgreSQL、MySQL、Redis 存储、HTTP 分支调用和恢复逻辑。
 - `src/xa.rs`：MySQL/PostgreSQL XA 业务资源管理器、屏障、prepared transaction 扫描与幂等 phase-2。
 - `service/`：独立控制面服务。
+- `service/static/openapi.json`：覆盖原生、兼容、管理与运维端点的 OpenAPI 3.1 合同。
 - `proto/dtmgimp.proto`：与 dtm-labs/dtm 保持字段号兼容的 gRPC 协议合同和生成边界。
 - `docs/dtm-grpc.md`：Roze gRPC 生命周期、鉴权、健康检查和客户端契约。
 - `service/config.yaml`：开发环境示例配置，也是服务的默认配置。
@@ -20,6 +21,13 @@ Roze 的独立分布式事务协调器，默认提供 TCC，并支持 Saga 工�
 
 ```bash
 cargo test --workspace
+```
+
+不启动 Rust 编译器时，可独立重建并核对 HTTP 合同：
+
+```bash
+python scripts/generate-openapi.py
+python scripts/validate-openapi.py
 ```
 
 设置以下变量后，工作区测试还会执行真实关系型数据库契约测试：
@@ -75,6 +83,8 @@ docker compose -f compose.redis.yaml up --build
 ## 管理 Dashboard
 
 浏览器访问 `http://127.0.0.1:8090/dashboard` 可打开只读事务 Dashboard。页面视觉与交互参考 Roze Admin 的 Workspace/Resource Page：Admin 侧栏、工作区指标卡、紧凑筛选区、状态标签、事务进度、XA 人工对账计数、分页表格和审计时间线。页面通过 `GET /v1/dashboard` 获取脱敏快照，必须输入控制令牌；令牌只保存在当前页面内存，不写入 URL 或浏览器存储。`GET /v1/xa/reconciliation` 提供等待全局决策、phase-2 进行中和需要人工对账的 XA 安全摘要。
+
+`GET /openapi.json` 公开完整 OpenAPI 3.1 合同。该文件由 `scripts/generate-openapi.py` 确定性生成，`scripts/validate-openapi.py` 会与当前 Router 做逐路径覆盖检查并验证 schema 引用及 operationId 唯一性。
 
 Dashboard 数据不包含分支 URL、请求载荷、Header、metadata、Workflow 二进制数据或依赖错误，只返回 GID、类型、状态、分支计数、尝试次数和时间字段。审计时间线是容量 200、最新优先的进程内环形历史，每次快照最多返回 50 条脱敏控制事件；它不替代持久化审计 sink，服务重启后会清空。`/dashboard` 只提供静态页面壳，受保护的数据接口仍应仅暴露在管理网络或服务网格内。
 

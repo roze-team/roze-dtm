@@ -17,7 +17,8 @@
 | Topic/KV | 已支持核心 | 通用版本化 KV、订阅增删查、HTTP 兼容端点与 `topic://` 消息分支展开 |
 | Workflow DSL | 已支持核心 | 静态依赖图、恢复和逆序补偿；callback Workflow 支持复合进度、终态及 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复，互操作待验证 |
 | Redis 存储 | 部分支持 | 已有 Roze topology、revision CAS/屏障、服务端时间 + epoch 租约、恢复写入 fencing、KV/topic；真实 standalone/Cluster 故障证据待补 |
-| SDK | 部分支持 | 已提供 Rust HTTP/gRPC client，以及 TypeScript/JavaScript `/v1` 与 dtm-labs HTTP/JSON-RPC 兼容客户端；生成式 OpenAPI 待补 |
+| SDK | 已支持 Web 范围 | 已提供 Rust HTTP/gRPC client，以及 TypeScript/JavaScript `/v1` 与 dtm-labs HTTP/JSON-RPC 兼容客户端 |
+| OpenAPI | 已支持 | OpenAPI 3.1 覆盖全部 54 条 HTTP 路径，支持自由 JSON payload、Bearer 安全声明、确定性生成和 Router 覆盖校验 |
 | Dashboard | 部分支持 | 已有 Roze Admin 风格只读脱敏快照、独立页面和有界审计时间线；Roze Admin 内嵌模块和真实服务集成浏览器验证待补 |
 
 ## 实施顺序

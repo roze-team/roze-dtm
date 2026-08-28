@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, LazyLock, Mutex,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -837,6 +837,7 @@ async fn main() -> anyhow::Result<()> {
 fn control_router(state: ControlState) -> Router {
     Router::new()
         .route("/dashboard", get(dashboard))
+        .route("/openapi.json", get(openapi))
         .route("/healthz", get(health))
         .route("/startupz", get(health))
         .route("/readyz", get(ready))
@@ -894,6 +895,15 @@ fn control_router(state: ControlState) -> Router {
 
 async fn dashboard() -> Html<&'static str> {
     Html(include_str!("../static/dashboard.html"))
+}
+
+static OPENAPI_DOCUMENT: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../static/openapi.json"))
+        .expect("embedded OpenAPI document must be valid JSON")
+});
+
+async fn openapi() -> HttpResponse {
+    rest::json_response(StatusCode::OK, &*OPENAPI_DOCUMENT)
 }
 
 async fn health() -> HttpResponse {
@@ -2601,6 +2611,24 @@ fn store_url(config: &StoreConfig) -> anyhow::Result<&str> {
 mod tests {
     use super::*;
     use tower::ServiceExt as _;
+
+    #[test]
+    fn embedded_openapi_contract_is_versioned_and_covers_all_routes() {
+        assert_eq!(OPENAPI_DOCUMENT["openapi"], "3.1.0");
+        assert_eq!(
+            OPENAPI_DOCUMENT["info"]["title"],
+            "Roze DTM API"
+        );
+        assert_eq!(
+            OPENAPI_DOCUMENT["paths"]
+                .as_object()
+                .map(serde_json::Map::len),
+            Some(54)
+        );
+        assert!(OPENAPI_DOCUMENT["paths"]["/v1/tcc"].is_object());
+        assert!(OPENAPI_DOCUMENT["paths"]["/api/json-rpc"].is_object());
+        assert!(OPENAPI_DOCUMENT["components"]["schemas"]["JsonValue"].is_object());
+    }
 
     #[test]
     fn production_rejects_memory_store() {

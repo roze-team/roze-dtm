@@ -1,0 +1,2668 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "Roze DTM API",
+    "version": "0.1.0",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Native",
+      "description": "Roze-native transaction control plane"
+    },
+    {
+      "name": "Compatibility",
+      "description": "dtm-labs HTTP and JSON-RPC compatibility surface"
+    },
+    {
+      "name": "Management",
+      "description": "Roze Admin-compatible management resources"
+    },
+    {
+      "name": "Operations",
+      "description": "Health, readiness, metrics, and contract endpoints"
+    }
+  ],
+  "paths": {
+    "/api/dtmsvr/abort": {
+      "post": {
+        "operationId": "compatAbort",
+        "summary": "Compat abort",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatSuccess"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompatTransactionRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dtmsvr/all": {
+      "get": {
+        "operationId": "compatAll",
+        "summary": "Compat all",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatPayload"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "transType",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "position",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "createTimeStart",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "createTimeEnd",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/api/dtmsvr/forceStop": {
+      "post": {
+        "operationId": "compatForceStop",
+        "summary": "Compat force stop",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatSuccess"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompatAdminRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dtmsvr/newGid": {
+      "get": {
+        "operationId": "compatNewGid",
+        "summary": "Compat new gid",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatPayload"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dtmsvr/prepare": {
+      "post": {
+        "operationId": "compatPrepare",
+        "summary": "Compat prepare",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatSuccess"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompatTransactionRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dtmsvr/prepareWorkflow": {
+      "post": {
+        "operationId": "compatPrepareWorkflow",
+        "summary": "Compat prepare workflow",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatPayload"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompatTransactionRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dtmsvr/query": {
+      "get": {
+        "operationId": "compatQuery",
+        "summary": "Compat query",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatPayload"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/dtmsvr/queryKV": {
+      "get": {
+        "operationId": "compatQueryKV",
+        "summary": "Compat query k v",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatPayload"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "cat",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/dtmsvr/registerBranch": {
+      "post": {
+        "operationId": "compatRegisterBranch",
+        "summary": "Compat register branch",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatSuccess"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompatBranchRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dtmsvr/registerTccBranch": {
+      "post": {
+        "operationId": "compatRegisterTccBranch",
+        "summary": "Compat register tcc branch",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatSuccess"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompatBranchRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dtmsvr/registerXaBranch": {
+      "post": {
+        "operationId": "compatRegisterXaBranch",
+        "summary": "Compat register xa branch",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatSuccess"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompatBranchRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dtmsvr/resetCronTime": {
+      "get": {
+        "operationId": "compatResetCronTime",
+        "summary": "Compat reset cron time",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatPayload"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "timeout",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 105
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 100
+            }
+          }
+        ]
+      }
+    },
+    "/api/dtmsvr/resetNextCronTime": {
+      "post": {
+        "operationId": "compatResetNextCronTime",
+        "summary": "Compat reset next cron time",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatSuccess"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompatAdminRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dtmsvr/scanKV": {
+      "get": {
+        "operationId": "compatScanKV",
+        "summary": "Compat scan k v",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatPayload"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "cat",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "position",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ]
+      }
+    },
+    "/api/dtmsvr/submit": {
+      "post": {
+        "operationId": "compatSubmit",
+        "summary": "Compat submit",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatSuccess"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompatTransactionRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dtmsvr/subscribe": {
+      "get": {
+        "operationId": "compatSubscribe",
+        "summary": "Compat subscribe",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatPayload"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "topic",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "url",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            }
+          },
+          {
+            "name": "remark",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/dtmsvr/topic/{topic_name}": {
+      "delete": {
+        "operationId": "compatDeleteTopic",
+        "summary": "Compat delete topic",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatSuccess"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "topic_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/api/dtmsvr/unsubscribe": {
+      "get": {
+        "operationId": "compatUnsubscribe",
+        "summary": "Compat unsubscribe",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatPayload"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "topic",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "url",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            }
+          }
+        ]
+      }
+    },
+    "/api/dtmsvr/version": {
+      "get": {
+        "operationId": "compatVersion",
+        "summary": "Compat version",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatPayload"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/json-rpc": {
+      "post": {
+        "operationId": "jsonRpc",
+        "summary": "Json rpc",
+        "tags": [
+          "Compatibility"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JsonRpcResponse"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JsonRpcRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/metrics": {
+      "get": {
+        "operationId": "compatMetrics",
+        "summary": "Compat metrics",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/dashboard": {
+      "get": {
+        "operationId": "dashboardHtml",
+        "summary": "Dashboard html",
+        "tags": [
+          "Management"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "health",
+        "summary": "Health",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/JsonValue"
+                    },
+                    "trace_id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "metrics",
+        "summary": "Metrics",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "openapi",
+        "summary": "Openapi",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "ready",
+        "summary": "Ready",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/JsonValue"
+                    },
+                    "trace_id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/startupz": {
+      "get": {
+        "operationId": "startup",
+        "summary": "Startup",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "code",
+                    "message",
+                    "data"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "integer"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/JsonValue"
+                    },
+                    "trace_id": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/dashboard": {
+      "get": {
+        "operationId": "dashboardSnapshot",
+        "summary": "Dashboard snapshot",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardSnapshotEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          }
+        ]
+      }
+    },
+    "/v1/messages": {
+      "post": {
+        "operationId": "submitMessage",
+        "summary": "Submit message",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitTransactionRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/messages/{gid}/abort": {
+      "post": {
+        "operationId": "abortMessages",
+        "summary": "Abort messages",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/messages/{gid}/dispatch": {
+      "post": {
+        "operationId": "dispatchMessages",
+        "summary": "Dispatch messages",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/messages/{gid}/prepare": {
+      "post": {
+        "operationId": "prepareMessages",
+        "summary": "Prepare messages",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/recover": {
+      "post": {
+        "operationId": "recoverAll",
+        "summary": "Recover all",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryResultEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/saga": {
+      "post": {
+        "operationId": "submitSaga",
+        "summary": "Submit saga",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitTransactionRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/saga/{gid}/abort": {
+      "post": {
+        "operationId": "abortSaga",
+        "summary": "Abort saga",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/saga/{gid}/start": {
+      "post": {
+        "operationId": "startSaga",
+        "summary": "Start saga",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/stats": {
+      "get": {
+        "operationId": "stats",
+        "summary": "Stats",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionStatsEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tcc": {
+      "post": {
+        "operationId": "submitTcc",
+        "summary": "Submit tcc",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitTransactionRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/tcc/{gid}/cancel": {
+      "post": {
+        "operationId": "cancelTcc",
+        "summary": "Cancel tcc",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/tcc/{gid}/confirm": {
+      "post": {
+        "operationId": "confirmTcc",
+        "summary": "Confirm tcc",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/tcc/{gid}/prepare": {
+      "post": {
+        "operationId": "prepareTcc",
+        "summary": "Prepare tcc",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/transactions": {
+      "get": {
+        "operationId": "listTransactions",
+        "summary": "List transactions",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionPageEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          }
+        ]
+      }
+    },
+    "/v1/transactions/{gid}": {
+      "get": {
+        "operationId": "getTransaction",
+        "summary": "Get transaction",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/transactions/{gid}/force-stop": {
+      "post": {
+        "operationId": "forcestopTransaction",
+        "summary": "Forcestop transaction",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/transactions/{gid}/recover": {
+      "post": {
+        "operationId": "recoverTransaction",
+        "summary": "Recover transaction",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/transactions/{gid}/reset-retry": {
+      "post": {
+        "operationId": "resetretryTransaction",
+        "summary": "Resetretry transaction",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/workflows": {
+      "post": {
+        "operationId": "submitWorkflow",
+        "summary": "Submit workflow",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitTransactionRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/workflows/{gid}/abort": {
+      "post": {
+        "operationId": "abortWorkflows",
+        "summary": "Abort workflows",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/workflows/{gid}/start": {
+      "post": {
+        "operationId": "startWorkflows",
+        "summary": "Start workflows",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/xa": {
+      "post": {
+        "operationId": "submitXa",
+        "summary": "Submit xa",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitTransactionRequest"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/xa/reconciliation": {
+      "get": {
+        "operationId": "xaReconciliation",
+        "summary": "Xa reconciliation",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/XaReconciliationSnapshotEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/xa/{gid}/commit": {
+      "post": {
+        "operationId": "commitXa",
+        "summary": "Commit xa",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/xa/{gid}/prepare": {
+      "post": {
+        "operationId": "prepareXa",
+        "summary": "Prepare xa",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    },
+    "/v1/xa/{gid}/rollback": {
+      "post": {
+        "operationId": "rollbackXa",
+        "summary": "Rollback xa",
+        "tags": [
+          "Native"
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransactionEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "gid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "JsonValue": {},
+      "TransactionOptions": {
+        "type": "object",
+        "properties": {
+          "wait_result": {
+            "type": "boolean",
+            "default": false
+          },
+          "retry_interval_millis": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "request_timeout_millis": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "retry_limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "branch_headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "BranchRequest": {
+        "type": "object",
+        "required": [
+          "id",
+          "action"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "SagaAction",
+                  "SagaCompensate",
+                  "TccTry",
+                  "TccConfirm",
+                  "TccCancel",
+                  "WorkflowAction",
+                  "MessageAction",
+                  "XaAction"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "action": {
+            "type": "string"
+          },
+          "compensate": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confirm": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cancel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payload": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "SubmitTransactionRequest": {
+        "type": "object",
+        "required": [
+          "gid",
+          "branches"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "gid": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "Saga",
+                  "Workflow",
+                  "Message",
+                  "Xa",
+                  "Tcc"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BranchRequest"
+            }
+          },
+          "timeout_millis": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "options": {
+            "$ref": "#/components/schemas/TransactionOptions"
+          }
+        }
+      },
+      "Branch": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/BranchRequest"
+          },
+          {
+            "type": "object",
+            "required": [
+              "kind",
+              "payload",
+              "status",
+              "attempts",
+              "last_error",
+              "next_retry_millis",
+              "dependencies"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "SagaAction",
+                  "SagaCompensate",
+                  "TccTry",
+                  "TccConfirm",
+                  "TccCancel",
+                  "WorkflowAction",
+                  "MessageAction",
+                  "XaAction"
+                ]
+              },
+              "payload": {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "Pending",
+                  "Running",
+                  "Compensating",
+                  "Succeeded",
+                  "Failed",
+                  "Skipped"
+                ]
+              },
+              "attempts": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "last_error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "next_retry_millis": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "dependencies": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Transaction": {
+        "type": "object",
+        "required": [
+          "gid",
+          "kind",
+          "status",
+          "branches",
+          "created_at_millis",
+          "updated_at_millis",
+          "revision",
+          "timeout_millis",
+          "options",
+          "metadata"
+        ],
+        "properties": {
+          "gid": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "Saga",
+              "Workflow",
+              "Message",
+              "Xa",
+              "Tcc"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "Submitted",
+              "Trying",
+              "Prepared",
+              "Succeeding",
+              "Succeeded",
+              "Aborting",
+              "Aborted",
+              "Failed"
+            ]
+          },
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Branch"
+            }
+          },
+          "created_at_millis": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "updated_at_millis": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "timeout_millis": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "options": {
+            "$ref": "#/components/schemas/TransactionOptions"
+          },
+          "workflow_progresses": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "TransactionPage": {
+        "type": "object",
+        "required": [
+          "items",
+          "offset",
+          "limit",
+          "total"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Transaction"
+            }
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "TransactionStats": {
+        "type": "object",
+        "required": [
+          "total",
+          "by_kind",
+          "by_status"
+        ],
+        "properties": {
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "by_kind": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "by_status": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          }
+        }
+      },
+      "RecoveryResult": {
+        "type": "object",
+        "required": [
+          "recovered",
+          "count"
+        ],
+        "properties": {
+          "recovered": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Transaction"
+            }
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "DashboardSnapshot": {
+        "type": "object",
+        "description": "Bounded, redacted Roze Admin dashboard snapshot"
+      },
+      "XaReconciliationSnapshot": {
+        "type": "object",
+        "description": "Redacted XA reconciliation snapshot"
+      },
+      "CompatTransactionRequest": {
+        "type": "object",
+        "required": [
+          "gid",
+          "trans_type"
+        ],
+        "properties": {
+          "gid": {
+            "type": "string"
+          },
+          "trans_type": {
+            "type": "string",
+            "enum": [
+              "tcc",
+              "saga",
+              "workflow",
+              "msg",
+              "message",
+              "xa"
+            ]
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          },
+          "payloads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JsonValue"
+            }
+          },
+          "timeout_to_fail": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "rollback_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "custom_data": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "query_prepared": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "wait_result": {
+            "type": "boolean"
+          },
+          "retry_interval": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "request_timeout": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "retry_limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "branch_headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "req_extra": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "CompatBranchRequest": {
+        "type": "object",
+        "required": [
+          "gid",
+          "trans_type",
+          "branch_id"
+        ],
+        "properties": {
+          "gid": {
+            "type": "string"
+          },
+          "trans_type": {
+            "type": "string",
+            "enum": [
+              "tcc",
+              "xa",
+              "workflow"
+            ]
+          },
+          "branch_id": {
+            "type": "string"
+          },
+          "data": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "op": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "confirm": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cancel": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CompatAdminRequest": {
+        "type": "object",
+        "required": [
+          "gid"
+        ],
+        "properties": {
+          "gid": {
+            "type": "string"
+          }
+        }
+      },
+      "CompatSuccess": {
+        "type": "object",
+        "required": [
+          "dtm_result"
+        ],
+        "properties": {
+          "dtm_result": {
+            "const": "SUCCESS"
+          }
+        }
+      },
+      "CompatPayload": {
+        "type": "object",
+        "required": [
+          "dtm_result"
+        ],
+        "properties": {
+          "dtm_result": {
+            "enum": [
+              "SUCCESS",
+              "FAILURE"
+            ]
+          }
+        },
+        "additionalProperties": true
+      },
+      "JsonRpcRequest": {
+        "type": "object",
+        "required": [
+          "jsonrpc",
+          "id",
+          "method"
+        ],
+        "properties": {
+          "jsonrpc": {
+            "const": "2.0"
+          },
+          "id": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "method": {
+            "enum": [
+              "newGid",
+              "prepare",
+              "submit",
+              "abort",
+              "registerBranch"
+            ]
+          },
+          "params": {
+            "$ref": "#/components/schemas/JsonValue"
+          }
+        }
+      },
+      "JsonRpcResponse": {
+        "type": "object",
+        "required": [
+          "jsonrpc",
+          "id"
+        ],
+        "properties": {
+          "jsonrpc": {
+            "const": "2.0"
+          },
+          "id": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "result": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "integer"
+              },
+              "message": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "TransactionEnvelope": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "data"
+        ],
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/Transaction"
+          },
+          "trace_id": {
+            "type": "string"
+          }
+        }
+      },
+      "TransactionPageEnvelope": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "data"
+        ],
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/TransactionPage"
+          },
+          "trace_id": {
+            "type": "string"
+          }
+        }
+      },
+      "TransactionStatsEnvelope": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "data"
+        ],
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/TransactionStats"
+          },
+          "trace_id": {
+            "type": "string"
+          }
+        }
+      },
+      "RecoveryResultEnvelope": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "data"
+        ],
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/RecoveryResult"
+          },
+          "trace_id": {
+            "type": "string"
+          }
+        }
+      },
+      "DashboardSnapshotEnvelope": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "data"
+        ],
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/DashboardSnapshot"
+          },
+          "trace_id": {
+            "type": "string"
+          }
+        }
+      },
+      "XaReconciliationSnapshotEnvelope": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "data"
+        ],
+        "properties": {
+          "code": {
+            "type": "integer"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/XaReconciliationSnapshot"
+          },
+          "trace_id": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

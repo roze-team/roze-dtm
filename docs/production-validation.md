@@ -34,7 +34,7 @@ bash scripts/redis-integration.sh
 
 HTTP、JSON-RPC 和 gRPC 兼容协议需要使用固定上游客户端版本执行 TCC、Saga、XA、Message、Workflow 和 callback Workflow 端到端矩阵。callback 还必须覆盖 HTTP `409/425`、JSON-RPC `-32901/-32902`、gRPC `ABORTED/FAILED_PRECONDITION`、TLS、超时和客户端在 callback 内提交终态的并发竞争。
 
-当前状态：协议合同和源码测试已存在；真实 Go/Rust 跨语言互操作仍未执行。
+当前状态：protobuf、OpenAPI 3.1、Rust/TypeScript/JavaScript 客户端合同和源码测试已存在；OpenAPI 已通过 Router 全覆盖检查及标准规范校验。真实 Go/Rust/TypeScript/JavaScript 跨语言互操作仍未执行。
 
 ## XA Resource Manager
 
