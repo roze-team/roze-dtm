@@ -163,4 +163,4 @@ MySQL 使用 `XA START/END/PREPARE/COMMIT/ROLLBACK`，PostgreSQL 使用 `BEGIN/P
 
 ## 当前边界
 
-已支持内存、SQLite、PostgreSQL、MySQL 与 Redis 存储，Saga、TCC、静态及 callback Workflow、二阶段消息和 XA 协调状态机，MySQL/PostgreSQL XA 资源管理器、资源侧启发式决策持久化与 prepared 对账，HTTP 分支调用、超时、重试、分支屏障、持久化恢复租约、Redis 恢复写入 fencing、版本化 KV、topic 订阅、自动恢复 worker、callback Workflow 的 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复、原生 Roze HTTP/gRPC 控制面、Roze Admin 风格脱敏 Dashboard、有界审计时间线和审计事件，以及 TypeScript/JavaScript 原生控制面 SDK。兼容协议的非 Rust SDK、生成式 OpenAPI 与 Roze Admin 内嵌模块仍属于后续扩展；XA、Redis、gRPC 适配器及 callback 恢复仍需完成编译、真实依赖、跨语言互操作和故障注入验证。
+已支持内存、SQLite、PostgreSQL、MySQL 与 Redis 存储，Saga、TCC、静态及 callback Workflow、二阶段消息和 XA 协调状态机，MySQL/PostgreSQL XA 资源管理器、资源侧启发式决策持久化与 prepared 对账，HTTP 分支调用、超时、重试、分支屏障、持久化恢复租约、Redis 恢复写入 fencing、版本化 KV、topic 订阅、自动恢复 worker、callback Workflow 的 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复、原生 Roze HTTP/gRPC 控制面、Roze Admin 风格脱敏 Dashboard、有界审计时间线和审计事件，以及 TypeScript/JavaScript 原生与 dtm-labs HTTP/JSON-RPC 兼容 SDK。生成式 OpenAPI 与 Roze Admin 内嵌模块仍属于后续扩展；XA、Redis、gRPC 适配器及 callback 恢复仍需完成编译、真实依赖、跨语言互操作和故障注入验证。

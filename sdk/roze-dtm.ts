@@ -151,7 +151,7 @@ export class RozeDtmClient {
   private adminTransition(gid: string, action: string, options?: RequestOptions) { return this.request<Transaction>("POST", `${this.gidPath(gid)}/${action}`, undefined, undefined, options); }
   private gidPath(gid: string) { if (!gid) throw new TypeError("gid must not be empty"); return `/v1/transactions/${encodeURIComponent(gid)}`; }
 
-  private async request<T>(method: string, path: string, query?: Record<string, unknown>, body?: unknown, options: RequestOptions = {}): Promise<T> {
+  private async request<T>(method: string, path: string, query?: object, body?: unknown, options: RequestOptions = {}): Promise<T> {
     const url = new URL(this.baseUrl + path);
     if (query) for (const [key, value] of Object.entries(query)) if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
     const headers: Record<string, string> = { accept: "application/json", ...options.headers };

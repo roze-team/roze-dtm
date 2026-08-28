@@ -18,3 +18,15 @@ const transaction = await dtm.submitSaga({
 ```
 
 当前 Roze 1.0 `.api` 标量集合尚不能无损表达递归自由 JSON；因此这里保留真实的 `JsonValue` 类型，没有把分支 `payload` 错误收窄为字符串或固定对象。待生成器提供自由 JSON 类型后，再以 `.api` 生成 OpenAPI 和 Web SDK，并用合同差异检查替换此过渡实现。
+
+## dtm-labs 兼容客户端
+
+`roze-dtm-compat.ts` 和 `roze-dtm-compat.js` 覆盖 `/api/dtmsvr/**` 的版本、GID、事务操作、动态分支、callback Workflow、查询分页、恢复管理、topic/KV，以及 `/api/json-rpc` 的五个方法。它按上游原始 `dtm_result` 或 JSON-RPC 2.0 合同处理响应，不会将其误当作 Roze envelope。
+
+```ts
+import { RozeDtmCompatClient } from "./roze-dtm-compat.js";
+
+const compat = new RozeDtmCompatClient("https://dtm.example.com", process.env.DTM_TOKEN);
+const { gid } = await compat.newGid();
+await compat.prepare({ gid, trans_type: "tcc" });
+```

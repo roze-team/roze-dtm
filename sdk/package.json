@@ -9,11 +9,17 @@
     ".": {
       "types": "./roze-dtm.ts",
       "import": "./roze-dtm.js"
+    },
+    "./compat": {
+      "types": "./roze-dtm-compat.ts",
+      "import": "./roze-dtm-compat.js"
     }
   },
   "files": [
     "roze-dtm.js",
     "roze-dtm.ts",
+    "roze-dtm-compat.js",
+    "roze-dtm-compat.ts",
     "README.md"
   ],
   "engines": {
