@@ -73,9 +73,9 @@ docker compose -f compose.redis.yaml up --build
 
 ## 管理 Dashboard
 
-浏览器访问 `http://127.0.0.1:8090/dashboard` 可打开只读事务 Dashboard。页面视觉与交互参考 Roze Admin 的 Workspace/Resource Page：工作区指标卡、紧凑筛选区、状态标签、事务进度、XA 人工对账计数和分页表格。页面通过 `GET /v1/dashboard` 获取脱敏快照，必须输入控制令牌；令牌只保存在当前页面内存，不写入 URL 或浏览器存储。`GET /v1/xa/reconciliation` 提供等待全局决策、phase-2 进行中和需要人工对账的 XA 安全摘要。
+浏览器访问 `http://127.0.0.1:8090/dashboard` 可打开只读事务 Dashboard。页面视觉与交互参考 Roze Admin 的 Workspace/Resource Page：Admin 侧栏、工作区指标卡、紧凑筛选区、状态标签、事务进度、XA 人工对账计数、分页表格和审计时间线。页面通过 `GET /v1/dashboard` 获取脱敏快照，必须输入控制令牌；令牌只保存在当前页面内存，不写入 URL 或浏览器存储。`GET /v1/xa/reconciliation` 提供等待全局决策、phase-2 进行中和需要人工对账的 XA 安全摘要。
 
-Dashboard 数据不包含分支 URL、请求载荷、Header、metadata、Workflow 二进制数据或依赖错误，只返回 GID、类型、状态、分支计数、尝试次数和时间字段。`/dashboard` 只提供静态页面壳，受保护的数据接口仍应仅暴露在管理网络或服务网格内。
+Dashboard 数据不包含分支 URL、请求载荷、Header、metadata、Workflow 二进制数据或依赖错误，只返回 GID、类型、状态、分支计数、尝试次数和时间字段。审计时间线是容量 200、最新优先的进程内环形历史，每次快照最多返回 50 条脱敏控制事件；它不替代持久化审计 sink，服务重启后会清空。`/dashboard` 只提供静态页面壳，受保护的数据接口仍应仅暴露在管理网络或服务网格内。
 
 ## 存储后端
 

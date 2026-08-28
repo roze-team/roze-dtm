@@ -44,9 +44,9 @@ MySQL 验证必须启用 InnoDB，并覆盖 XA START 之后、分支注册之后
 
 ## Dashboard
 
-`GET /dashboard` 仅提供静态页面，`GET /v1/dashboard` 必须验证 Bearer 控制令牌。生产验收需要覆盖未授权拒绝、筛选与分页边界、空数据、各事务状态、窄屏和系统暗色模式，并检查浏览器网络响应中不存在分支 URL、payload、Header、metadata、Workflow 数据或依赖错误。控制令牌不得进入 URL、localStorage、sessionStorage、日志或表格 DOM。
+`GET /dashboard` 仅提供静态页面，`GET /v1/dashboard` 必须验证 Bearer 控制令牌。生产验收需要覆盖未授权拒绝、筛选与分页边界、空数据、各事务状态、审计历史容量/顺序、窄屏和系统暗色模式，并检查浏览器网络响应中不存在分支 URL、payload、Header、metadata、Workflow 数据、依赖错误或错误正文。控制令牌不得进入 URL、localStorage、sessionStorage、日志或表格 DOM；进程重启后审计时间线清空，不得将它误作持久审计证据。
 
-当前状态：页面、脱敏快照、XA 人工对账指标和 `/v1/xa/reconciliation` 源码测试已加入，视觉与信息层级已按 `roze-admin` 的 Workspace/Resource Page 规范对齐；已用本地静态 HTTP 服务完成浏览器渲染和控制台错误检查。受当前禁编译要求约束，尚未执行真实 Roze 服务、受保护 API 或端到端验证，因此状态保持 `inconclusive`。
+当前状态：Roze Admin 风格页面、脱敏快照、XA 人工对账指标、有界审计时间线和 `/v1/xa/reconciliation` 源码测试已加入；已用本地静态 HTTP 服务完成桌面/390px 窄屏浏览器渲染、连接失败反馈和控制台错误检查。受当前禁编译要求约束，尚未执行真实 Roze 服务、受保护 Dashboard API、暗色模式或端到端验证，因此状态保持 `inconclusive`。
 
 ## 生产证据要求
 

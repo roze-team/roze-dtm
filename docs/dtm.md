@@ -76,7 +76,7 @@ Authorization: Bearer <ROZE_DTM_CONTROL_TOKEN>
 
 所有业务响应使用 Roze 数字信封：成功 `code: 0`，错误 code 与 HTTP 状态一致。查询参数支持 `gid`、`kind`、`status`、`offset`、`limit`；默认 limit 为 50，最大为 200。
 
-Dashboard API 使用同一组过滤和分页边界，但只返回管理摘要字段。它明确排除分支 Action/Confirm/Cancel/Compensate URL、payload、Header、metadata、Workflow progress data、回滚原因和依赖错误。页面不会持久化控制令牌，也不会加载第三方脚本、字体或图片；部署方仍需在入口层为 `/dashboard` 与 `/v1/dashboard` 配置 TLS、访问来源限制和常规安全响应头。
+Dashboard API 使用同一组过滤和分页边界，但只返回管理摘要字段。它明确排除分支 Action/Confirm/Cancel/Compensate URL、payload、Header、metadata、Workflow progress data、回滚原因和依赖错误。响应还包含最近 50 条控制审计事件，底层进程内历史固定容量为 200；事件仅含 sequence、时间、稳定事件名、结果、可选 GID 和事务状态，不含 token、错误正文或业务数据。该环形历史用于即时运维态势，不能替代非丢弃持久审计 sink。页面不会持久化控制令牌，也不会加载第三方脚本、字体或图片；部署方仍需在入口层为 `/dashboard` 与 `/v1/dashboard` 配置 TLS、访问来源限制和常规安全响应头。
 
 ## TCC 请求
 
@@ -159,8 +159,8 @@ MySQL 使用 `XA START/END/PREPARE/COMMIT/ROLLBACK`，PostgreSQL 使用 `BEGIN/P
 
 ## 日志与审计
 
-提交、状态推进、手工恢复和自动恢复均使用稳定事件名。控制面成功或失败事件通过 `roze.audit` 目标输出；配置独立审计 sink 时写入非丢弃 JSONL 文件，否则进入普通日志 sink。日志不得包含控制令牌、请求载荷、分支响应体或原始依赖错误。
+提交、状态推进、手工恢复和自动恢复均使用稳定事件名。控制面成功或失败事件通过 `roze.audit` 目标输出；配置独立审计 sink 时写入非丢弃 JSONL 文件，否则进入普通日志 sink。Dashboard 同时维护有界、重启即失的脱敏事件视图，便于即时排障但不作为合规审计记录。日志和 Dashboard 均不得包含控制令牌、请求载荷、分支响应体或原始依赖错误。
 
 ## 当前边界
 
-已支持内存、SQLite、PostgreSQL、MySQL 与 Redis 存储，Saga、TCC、静态及 callback Workflow、二阶段消息和 XA 协调状态机，MySQL/PostgreSQL XA 资源管理器、资源侧启发式决策持久化与 prepared 对账，HTTP 分支调用、超时、重试、分支屏障、持久化恢复租约、Redis 恢复写入 fencing、版本化 KV、topic 订阅、自动恢复 worker、callback Workflow 的 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复、原生 Roze HTTP/gRPC 控制面、脱敏 Dashboard 和审计事件。其他语言 SDK 与 Dashboard 审计时间线仍属于后续扩展；XA、Redis、gRPC 适配器及 callback 恢复仍需完成编译、真实依赖、跨语言互操作和故障注入验证。
+已支持内存、SQLite、PostgreSQL、MySQL 与 Redis 存储，Saga、TCC、静态及 callback Workflow、二阶段消息和 XA 协调状态机，MySQL/PostgreSQL XA 资源管理器、资源侧启发式决策持久化与 prepared 对账，HTTP 分支调用、超时、重试、分支屏障、持久化恢复租约、Redis 恢复写入 fencing、版本化 KV、topic 订阅、自动恢复 worker、callback Workflow 的 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复、原生 Roze HTTP/gRPC 控制面、Roze Admin 风格脱敏 Dashboard、有界审计时间线和审计事件。其他语言 SDK 与 Roze Admin 内嵌模块仍属于后续扩展；XA、Redis、gRPC 适配器及 callback 恢复仍需完成编译、真实依赖、跨语言互操作和故障注入验证。

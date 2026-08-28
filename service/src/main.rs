@@ -1,8 +1,8 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -264,6 +264,54 @@ struct ControlState {
     branch_url_policy: BranchUrlPolicy,
     control_token: Option<Arc<str>>,
     lifecycle: Option<LifecycleState>,
+    audit_history: Arc<DashboardAuditHistory>,
+}
+
+const DASHBOARD_AUDIT_CAPACITY: usize = 200;
+const DASHBOARD_AUDIT_LIMIT: usize = 50;
+
+#[derive(Default)]
+struct DashboardAuditHistory {
+    next_sequence: AtomicU64,
+    events: Mutex<VecDeque<DashboardAuditEvent>>,
+}
+
+impl DashboardAuditHistory {
+    fn record(
+        &self,
+        event: &'static str,
+        outcome: &'static str,
+        resource_id: Option<&str>,
+        transaction_status: Option<&str>,
+    ) {
+        let mut events = self
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let sequence = self
+            .next_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        events.push_front(DashboardAuditEvent {
+            sequence,
+            occurred_at_millis: unix_millis(),
+            event: event.to_owned(),
+            outcome: outcome.to_owned(),
+            resource_id: resource_id.map(str::to_owned),
+            transaction_status: transaction_status.map(str::to_owned),
+        });
+        events.truncate(DASHBOARD_AUDIT_CAPACITY);
+    }
+
+    fn latest(&self) -> Vec<DashboardAuditEvent> {
+        self.events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .take(DASHBOARD_AUDIT_LIMIT)
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Deserialize)]
@@ -335,6 +383,26 @@ struct DashboardSnapshot {
     generated_at_millis: u64,
     summary: DashboardSummary,
     transactions: DashboardTransactionPage,
+    audit: DashboardAuditTimeline,
+}
+
+#[derive(Serialize)]
+struct DashboardAuditTimeline {
+    items: Vec<DashboardAuditEvent>,
+    limit: usize,
+    capacity: usize,
+}
+
+#[derive(Clone, Serialize)]
+struct DashboardAuditEvent {
+    sequence: u64,
+    occurred_at_millis: u64,
+    event: String,
+    outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transaction_status: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -596,6 +664,7 @@ async fn main() -> anyhow::Result<()> {
             .clone()
             .map(Arc::<str>::from),
         lifecycle: Some(group.lifecycle()),
+        audit_history: Arc::new(DashboardAuditHistory::default()),
     };
     let service = control_router(state.clone());
     tracing::info!(
@@ -671,9 +740,11 @@ async fn main() -> anyhow::Result<()> {
     let recovery_interval = Duration::from_millis(config.application.dtm.recover_interval_ms);
     let recovery_lease_ttl_ms = config.application.dtm.recovery_lease_ttl_ms;
     let recovery_worker_id = config.application.dtm.worker_id.clone();
+    let recovery_audit_history = Arc::clone(&state.audit_history);
     group.add_fn("dtm-recovery", move |shutdown| {
         let dtm = Arc::clone(&recovery_dtm);
         let worker_id = recovery_worker_id.clone();
+        let audit_history = Arc::clone(&recovery_audit_history);
         async move {
             let mut ticker = tokio::time::interval(recovery_interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -699,13 +770,27 @@ async fn main() -> anyhow::Result<()> {
                                     transaction_count = recovered.len(),
                                     "DTM recovery worker advanced transactions"
                                 );
+                                audit_history.record(
+                                    "dtm.recovery.completed",
+                                    "success",
+                                    None,
+                                    None,
+                                );
                             }
                             Ok(_) => {}
-                            Err(_) => tracing::error!(
-                                event = "dtm.recovery.failed",
-                                error_kind = "recovery_tick_failed",
-                                "DTM recovery tick failed"
-                            ),
+                            Err(_) => {
+                                tracing::error!(
+                                    event = "dtm.recovery.failed",
+                                    error_kind = "recovery_tick_failed",
+                                    "DTM recovery tick failed"
+                                );
+                                audit_history.record(
+                                    "dtm.recovery.failed",
+                                    "failed",
+                                    None,
+                                    None,
+                                );
+                            }
                         }
                     }
                 }
@@ -1630,10 +1715,15 @@ async fn submit_transaction(
     };
     match state.dtm.submit(transaction).await {
         Ok(transaction) => {
-            audit_transition("dtm.transaction.submit", &transaction);
+            audit_transition(&state.audit_history, "dtm.transaction.submit", &transaction);
             ok_response(transaction)
         }
-        Err(error) => operation_error("dtm.transaction.submit", Some(&gid), &error),
+        Err(error) => operation_error(
+            &state.audit_history,
+            "dtm.transaction.submit",
+            Some(&gid),
+            &error,
+        ),
     }
 }
 
@@ -1649,10 +1739,12 @@ macro_rules! transition_handler {
             }
             match state.dtm.$method(&path.gid).await {
                 Ok(transaction) => {
-                    audit_transition($event, &transaction);
+                    audit_transition(&state.audit_history, $event, &transaction);
                     ok_response(transaction)
                 }
-                Err(error) => operation_error($event, Some(&path.gid), &error),
+                Err(error) => {
+                    operation_error(&state.audit_history, $event, Some(&path.gid), &error)
+                }
             }
         }
     };
@@ -1686,7 +1778,12 @@ async fn get_transaction(
     match state.dtm.store().get_transaction(&path.gid).await {
         Ok(Some(transaction)) => ok_response(transaction),
         Ok(None) => error_response(StatusCode::NOT_FOUND, "transaction not found"),
-        Err(error) => operation_error("dtm.transaction.get", Some(&path.gid), &error),
+        Err(error) => operation_error(
+            &state.audit_history,
+            "dtm.transaction.get",
+            Some(&path.gid),
+            &error,
+        ),
     }
 }
 
@@ -1736,7 +1833,12 @@ async fn list_transactions(
                 total,
             })
         }
-        Err(error) => operation_error("dtm.transaction.list", None, &error),
+        Err(error) => operation_error(
+            &state.audit_history,
+            "dtm.transaction.list",
+            None,
+            &error,
+        ),
     }
 }
 
@@ -1755,9 +1857,20 @@ async fn recover_all(State(state): State<ControlState>, headers: HeaderMap) -> H
                 transaction_count = count,
                 "DTM recovery tick completed"
             );
+            state.audit_history.record(
+                "dtm.recovery.tick",
+                "success",
+                None,
+                None,
+            );
             ok_response(RecoveryResult { recovered, count })
         }
-        Err(error) => operation_error("dtm.recovery.tick", None, &error),
+        Err(error) => operation_error(
+            &state.audit_history,
+            "dtm.recovery.tick",
+            None,
+            &error,
+        ),
     }
 }
 
@@ -1783,7 +1896,7 @@ async fn stats(State(state): State<ControlState>, headers: HeaderMap) -> HttpRes
                 by_status,
             })
         }
-        Err(error) => operation_error("dtm.stats.get", None, &error),
+        Err(error) => operation_error(&state.audit_history, "dtm.stats.get", None, &error),
     }
 }
 
@@ -1796,11 +1909,20 @@ async fn dashboard_snapshot(
         return unauthorized_response();
     }
     match state.dtm.list().await {
-        Ok(transactions) => match build_dashboard_snapshot(transactions, query) {
+        Ok(transactions) => match build_dashboard_snapshot(
+            transactions,
+            query,
+            state.audit_history.latest(),
+        ) {
             Ok(snapshot) => ok_response(snapshot),
             Err(message) => error_response(StatusCode::BAD_REQUEST, message),
         },
-        Err(error) => operation_error("dtm.dashboard.get", None, &error),
+        Err(error) => operation_error(
+            &state.audit_history,
+            "dtm.dashboard.get",
+            None,
+            &error,
+        ),
     }
 }
 
@@ -1813,7 +1935,12 @@ async fn xa_reconciliation(
     }
     match state.dtm.list().await {
         Ok(transactions) => ok_response(build_xa_reconciliation(transactions)),
-        Err(error) => operation_error("dtm.xa.reconciliation.get", None, &error),
+        Err(error) => operation_error(
+            &state.audit_history,
+            "dtm.xa.reconciliation.get",
+            None,
+            &error,
+        ),
     }
 }
 
@@ -1892,6 +2019,7 @@ fn xa_reconciliation_state(transaction: &Transaction) -> Option<&'static str> {
 fn build_dashboard_snapshot(
     transactions: Vec<Transaction>,
     query: TransactionQuery,
+    audit_events: Vec<DashboardAuditEvent>,
 ) -> Result<DashboardSnapshot, &'static str> {
     let limit = query.limit.unwrap_or(50);
     if limit == 0 || limit > 200 || query.offset > 1_000_000 {
@@ -1980,6 +2108,11 @@ fn build_dashboard_snapshot(
             offset: query.offset,
             limit,
             total,
+        },
+        audit: DashboardAuditTimeline {
+            items: audit_events,
+            limit: DASHBOARD_AUDIT_LIMIT,
+            capacity: DASHBOARD_AUDIT_CAPACITY,
         },
     })
 }
@@ -2250,7 +2383,11 @@ const fn workflow_progress_status_name(status: WorkflowProgressStatus) -> &'stat
     }
 }
 
-fn audit_transition(event: &'static str, transaction: &Transaction) {
+fn audit_transition(
+    history: &DashboardAuditHistory,
+    event: &'static str,
+    transaction: &Transaction,
+) {
     if transaction.branches.iter().any(|branch| {
         matches!(
             branch.status,
@@ -2267,6 +2404,12 @@ fn audit_transition(event: &'static str, transaction: &Transaction) {
             transaction_status = status_name(transaction.status),
             "DTM control operation requires retry"
         );
+        history.record(
+            event,
+            "pending_retry",
+            Some(&transaction.gid),
+            Some(status_name(transaction.status)),
+        );
     } else {
         roze_log::audit_info!(
             event = event,
@@ -2278,10 +2421,17 @@ fn audit_transition(event: &'static str, transaction: &Transaction) {
             transaction_status = status_name(transaction.status),
             "DTM control operation completed"
         );
+        history.record(
+            event,
+            "success",
+            Some(&transaction.gid),
+            Some(status_name(transaction.status)),
+        );
     }
 }
 
 fn operation_error(
+    history: &DashboardAuditHistory,
     operation: &'static str,
     gid: Option<&str>,
     error: &anyhow::Error,
@@ -2311,6 +2461,7 @@ fn operation_error(
         error_kind = "dtm_operation_failed",
         "DTM control operation failed"
     );
+    history.record(operation, "failed", gid, None);
     error_response(status, public_message)
 }
 
@@ -2323,6 +2474,12 @@ fn error_response(status: StatusCode, message: impl Into<String>) -> HttpRespons
         status,
         &roze_result::ApiResponse::<serde_json::Value>::error(status.as_u16() as i32, message),
     )
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 const fn default_max_attempts() -> u32 {
@@ -2626,6 +2783,7 @@ mod tests {
                 limit: Some(10),
                 ..TransactionQuery::default()
             },
+            Vec::new(),
         )
         .expect("dashboard snapshot");
         assert_eq!(snapshot.summary.total, 1);
@@ -2633,6 +2791,9 @@ mod tests {
         assert_eq!(snapshot.summary.retry_scheduled, 1);
         assert_eq!(snapshot.transactions.items[0].failed_branch_count, 1);
         assert_eq!(snapshot.transactions.items[0].total_attempts, 3);
+        assert_eq!(snapshot.audit.limit, DASHBOARD_AUDIT_LIMIT);
+        assert_eq!(snapshot.audit.capacity, DASHBOARD_AUDIT_CAPACITY);
+        assert!(snapshot.audit.items.is_empty());
 
         let wire = serde_json::to_string(&snapshot).expect("serialize dashboard snapshot");
         for sensitive in [
@@ -2655,6 +2816,7 @@ mod tests {
                 kind: Some("unknown".to_owned()),
                 ..TransactionQuery::default()
             },
+            Vec::new(),
         )
         .is_err());
         assert!(build_dashboard_snapshot(
@@ -2663,8 +2825,34 @@ mod tests {
                 limit: Some(201),
                 ..TransactionQuery::default()
             },
+            Vec::new(),
         )
         .is_err());
+    }
+
+    #[test]
+    fn dashboard_audit_history_is_bounded_and_latest_first() {
+        let history = DashboardAuditHistory::default();
+        for index in 0..(DASHBOARD_AUDIT_CAPACITY + 20) {
+            history.record(
+                "dtm.transaction.submit",
+                "success",
+                Some(&format!("gid-{index}")),
+                Some("submitted"),
+            );
+        }
+
+        let latest = history.latest();
+        assert_eq!(latest.len(), DASHBOARD_AUDIT_LIMIT);
+        assert_eq!(latest[0].sequence, (DASHBOARD_AUDIT_CAPACITY + 20) as u64);
+        assert_eq!(latest[0].resource_id.as_deref(), Some("gid-219"));
+        assert!(latest.windows(2).all(|pair| pair[0].sequence > pair[1].sequence));
+
+        let stored = history
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(stored.len(), DASHBOARD_AUDIT_CAPACITY);
     }
 
     #[test]
@@ -2704,10 +2892,12 @@ mod tests {
     fn dashboard_page_keeps_credentials_ephemeral() {
         let page = include_str!("../static/dashboard.html");
         assert!(page.contains("/v1/dashboard"));
-        assert!(page.contains("Roze DTM Control Plane"));
+        assert!(page.contains("Roze Admin"));
+        assert!(page.contains("审计时间线"));
         assert!(!page.contains("localStorage"));
         assert!(!page.contains("sessionStorage"));
         assert!(!page.contains("innerHTML"));
+        assert!(!page.contains("document.write"));
         assert!(!page.contains("https://"));
     }
 
@@ -2878,6 +3068,7 @@ mod tests {
             branch_url_policy,
             control_token: token.map(Arc::<str>::from),
             lifecycle: None,
+            audit_history: Arc::new(DashboardAuditHistory::default()),
         })
     }
 }
