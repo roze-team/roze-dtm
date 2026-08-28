@@ -14,7 +14,7 @@
 | 重试告警 | 已支持核心 | dtm-labs AlertWebHook 负载、顺序/并发失败阈值、超时与脱敏；真实 HTTPS 故障矩阵待补 |
 | DTM HTTP/JSON-RPC/gRPC 兼容 | 已支持核心 | 9 个 gRPC 方法、逐事务 timeout/retry/Header 及 WaitResult 异步调度；gRPC 互操作待补 |
 | XA | 部分支持 | 已有协调生命周期、动态分支、可信 phase-2 参数、MySQL/PostgreSQL Rust 资源管理器、启发式决策记录与 prepared 对账；真实数据库崩溃恢复矩阵待补 |
-| 二阶段消息 | 已支持核心 | Prepared/Dispatch/Abort、持久化延迟投递、上游 `custom_data.delay`，并复用 `roze-transaction` Outbox/Inbox 与 `roze-mq`；真实重启跨投递点验证待补 |
+| 二阶段消息 | 已支持核心 | Prepared/Dispatch/Abort、顺序/并发投递、部分失败精确重试、持久化延迟投递、上游顶层 `concurrent` 与 `custom_data.delay`，并复用 `roze-transaction` Outbox/Inbox 与 `roze-mq`；真实重启跨投递点验证待补 |
 | Topic/KV | 已支持核心 | 通用版本化 KV、订阅增删查、HTTP 兼容端点与 `topic://` 消息分支展开 |
 | Workflow DSL | 已支持核心 | 静态依赖图、恢复和逆序补偿；callback Workflow 支持复合进度、终态及 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复，互操作待验证 |
 | Redis 存储 | 部分支持 | 已有 Roze topology、revision CAS/屏障、服务端时间 + epoch 租约、恢复写入 fencing、KV/topic；真实 standalone/Cluster 故障证据待补 |

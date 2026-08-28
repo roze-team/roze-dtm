@@ -34,6 +34,8 @@
 
 并发 Saga 兼容上游 `custom_data`：`{"concurrent":true,"orders":{"2":[0,1]}}` 表示零基分支 2 必须在分支 0 和 1 成功后执行。Roze 将其转换为持久化分支 id 依赖图，按依赖就绪层并发执行，并按逆依赖层补偿。分支和依赖索引必须在范围内，且依赖必须位于当前分支之前；非法或成环图会失败闭合。
 
+并发 Message 兼容上游事务请求的顶层 `concurrent: true` 字段。Roze 在投递前统一持久化分支执行状态，并发调用全部未成功分支；部分失败时保留已成功分支的屏障和状态，后续恢复只重试失败分支。上游固定版本的 gRPC `DtmTransOptions` 不包含该字段，4 号字段是已废弃的透传 Header，因此 Roze 保留 `reserved 4`，不创建非上游兼容的 gRPC 扩展。
+
 延迟 Message 兼容上游 `custom_data`：`{"delay":10}` 表示从事务创建时间起延迟 10 秒投递。Roze 在 Submit 时先持久化明确的 `Succeeding` 决策，到期前不调用分支；恢复 worker 使用持久化创建时间计算投递点。原生 `/v1/messages` 使用毫秒字段 `options.delay_millis`。
 
 ## TCC 调用顺序

@@ -1891,7 +1891,7 @@
           "concurrent": {
             "type": "boolean",
             "default": false,
-            "description": "Run Saga branches by dependency-ready concurrent layers"
+            "description": "Run Saga branches by dependency-ready layers or deliver Message branches concurrently"
           },
           "delay_millis": {
             "type": [
@@ -2352,6 +2352,11 @@
           },
           "wait_result": {
             "type": "boolean"
+          },
+          "concurrent": {
+            "type": "boolean",
+            "default": false,
+            "description": "Upstream direct option for concurrent Saga or Message branches"
           },
           "retry_interval": {
             "type": [

@@ -116,7 +116,7 @@ Dashboard 数据不包含分支 URL、请求载荷、Header、metadata、Workflo
 
 动态分支注册由存储层原子执行：内存后端使用写锁，PostgreSQL/MySQL 使用行锁，SQLite 和 Redis 使用带冲突重试的比较更新，避免多实例并发注册互相覆盖。事务载荷包含向后兼容的单调 `revision`；旧记录缺失该字段时从 0 开始，后续成功变更递增。Redis 普通状态推进拒绝 stale revision，恢复推进还要求 owner、epoch 和 Redis 服务端过期时间同时匹配。五种后端也提供版本化通用 KV 和 topic 订阅；Message 的 `topic://name` 分支会在提交时展开为订阅 URL 快照。
 
-Saga 默认保持声明顺序；设置 `options.concurrent: true` 后，所有前置依赖已成功的分支按层并发执行。失败时仅补偿已经成功的分支，并按依赖反向分层并发补偿。未知、重复、自依赖或成环依赖会在持久化前拒绝。dtm-labs 兼容入口同时解析 `custom_data` 中的 `concurrent` 与零基 `orders`。
+Saga 默认保持声明顺序；设置 `options.concurrent: true` 后，所有前置依赖已成功的分支按层并发执行。失败时仅补偿已经成功的分支，并按依赖反向分层并发补偿。未知、重复、自依赖或成环依赖会在持久化前拒绝。Message 设置同一选项后会并发投递所有未成功分支，单个失败不回滚其他成功结果，恢复时仅重试失败分支。dtm-labs HTTP/JSON-RPC 兼容入口接受 Message 请求顶层 `concurrent`，Saga 同时解析 `custom_data` 中的 `concurrent` 与零基 `orders`。
 
 Message 支持原生 `options.delay_millis` 延迟投递；显式 Dispatch/Submit 决策会先持久化为 `Succeeding`，到达“创建时间 + 延迟”前不会调用分支，恢复 worker 按该时间唤醒。dtm-labs 兼容入口解析 `custom_data: {"delay": 10}`，其中上游单位为秒。
 

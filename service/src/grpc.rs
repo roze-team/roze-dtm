@@ -217,6 +217,9 @@ fn compat_request(
         custom_data: (!input.customed_data.is_empty()).then_some(input.customed_data),
         query_prepared: (!input.query_prepared.is_empty()).then_some(input.query_prepared),
         wait_result: options.wait_result,
+        // The pinned upstream gRPC contract has no Concurrent field. Field 4
+        // remains reserved for the deprecated passthrough-header option.
+        concurrent: false,
         retry_interval: positive_u64(options.retry_interval),
         request_timeout: positive_u64(options.request_timeout),
         retry_limit: positive_u64(options.retry_limit),

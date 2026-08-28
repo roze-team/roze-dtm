@@ -575,6 +575,7 @@ struct CompatTransactionRequest {
     custom_data: Option<String>,
     query_prepared: Option<String>,
     wait_result: bool,
+    concurrent: bool,
     retry_interval: Option<u64>,
     request_timeout: Option<u64>,
     retry_limit: Option<u64>,
@@ -1865,7 +1866,7 @@ fn compat_transaction_options(
 ) -> anyhow::Result<TransactionOptions> {
     let options = TransactionOptions {
         wait_result: request.wait_result,
-        concurrent: false,
+        concurrent: request.concurrent,
         delay_millis: None,
         retry_interval_millis: request
             .retry_interval
@@ -3072,6 +3073,32 @@ mod tests {
             vec!["01".to_owned(), "02".to_owned()]
         );
         validate_saga_dependencies(&transaction).expect("valid mapped Saga graph");
+    }
+
+    #[test]
+    fn compat_message_maps_direct_concurrent_option() {
+        let request = CompatTransactionRequest {
+            gid: "message-concurrent".to_owned(),
+            trans_type: "msg".to_owned(),
+            steps: vec![
+                [("action".to_owned(), "http://events/first".to_owned())]
+                    .into_iter()
+                    .collect(),
+                [("action".to_owned(), "http://events/second".to_owned())]
+                    .into_iter()
+                    .collect(),
+            ],
+            payloads: vec![serde_json::json!({}); 2],
+            concurrent: true,
+            ..CompatTransactionRequest::default()
+        };
+        let policy = BranchUrlPolicy::from_allowed_origins(["http://events"])
+            .expect("branch policy");
+        let transaction = compat_transaction(TransactionKind::Message, &request, &policy)
+            .expect("concurrent Message compatibility request");
+
+        assert!(transaction.options.concurrent);
+        validate_saga_dependencies(&transaction).expect("valid concurrent Message options");
     }
 
     #[test]

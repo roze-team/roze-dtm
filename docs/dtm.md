@@ -146,6 +146,8 @@ Message 可设置 `options.delay_millis`，从事务持久化的创建时间开�
 
 Saga 端点只接受 `SagaAction` 分支，并要求补偿地址。默认按声明顺序执行且不接受依赖；设置 `options.concurrent: true` 后，`dependencies` 构成有向无环图，所有依赖已经成功的分支在同一层并发执行。失败时只补偿成功分支，并按反向依赖层并发补偿，保证依赖方先于其前置分支回滚。依赖必须引用同一事务中的唯一分支 id；未知、重复、自依赖和环都会在事务写入前拒绝。
 
+Message 默认按声明顺序投递；设置 `options.concurrent: true` 后，协调器会先持久化提交决定和 Running 分支状态，再并发投递所有未成功分支。成功分支保留屏障，失败分支释放屏障并记录退避时间，恢复时只重试失败分支。该模式可与 `options.delay_millis` 组合，延迟到期前不会启动任何分支。
+
 ## XA 资源管理器
 
 `roze_dtm::xa::{MySqlXaResourceManager, PostgresXaResourceManager}` 面向业务数据库提供本地 XA 边界。全局事务先通过 `DtmHttpClient::prepare_xa` 创建；每个业务分支调用 `prepare_branch`，在一个独占连接内执行屏障、业务 SQL、`registerXaBranch` 和 Prepare；全局业务成功后调用 `commit_xa`，失败则调用 `rollback_xa`。业务 phase-2 路由根据协调器追加的 `gid`、`branch_id` 和 `op` 构造 `XaBranchDescriptor`，再调用资源管理器的 `resolve`。

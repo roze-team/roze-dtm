@@ -385,11 +385,10 @@ impl Transaction {
 pub struct TransactionOptions {
     #[serde(default)]
     pub wait_result: bool,
-    /// Enables dependency-aware concurrent execution for Saga branches.
+    /// Enables concurrent execution for Saga or Message branches.
     ///
-    /// When false, Saga branches retain their declaration-order semantics and
-    /// must not declare dependencies. When true, every dependency names a
-    /// branch that must succeed before the dependent branch can run.
+    /// Concurrent Saga branches use their dependency DAG. Concurrent Message
+    /// branches are independent and are delivered in one batch.
     #[serde(default)]
     pub concurrent: bool,
     /// Defers Message branch delivery from the transaction creation time.
@@ -4282,6 +4281,104 @@ where
             return Ok(tx);
         }
         let execution_options = tx.options.clone();
+        if execution_options.concurrent {
+            let ready = tx
+                .branches
+                .iter()
+                .enumerate()
+                .filter(|(_, branch)| branch.status != BranchStatus::Succeeded)
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            if ready.is_empty() {
+                tx.status = TransactionStatus::Succeeded;
+                self.persist_transaction(&mut tx).await?;
+                return Ok(tx);
+            }
+
+            let mut claimed = Vec::with_capacity(ready.len());
+            for &index in &ready {
+                let barrier = BranchBarrier::new(&tx.gid, &tx.branches[index].id, "message");
+                if self.store.barrier(barrier.clone()).await? != BarrierDecision::Execute {
+                    for barrier in claimed {
+                        self.store.release_barrier(&barrier).await?;
+                    }
+                    return self
+                        .store
+                        .get_transaction(&tx.gid)
+                        .await?
+                        .with_context(|| format!("transaction not found: {}", tx.gid));
+                }
+                claimed.push(barrier);
+            }
+            for &index in &ready {
+                tx.branches[index].status = BranchStatus::Running;
+                tx.branches[index].attempts = tx.branches[index].attempts.saturating_add(1);
+            }
+            self.persist_transaction(&mut tx).await?;
+
+            let retry_backoff_millis = execution_options
+                .retry_interval_millis
+                .unwrap_or(self.options.retry_backoff_millis);
+            let max_retry_backoff_millis = self
+                .options
+                .max_retry_backoff_millis
+                .max(retry_backoff_millis);
+            let mut tasks = tokio::task::JoinSet::new();
+            for index in ready {
+                let invoker = self.invoker.clone();
+                let gid = tx.gid.clone();
+                let options = execution_options.clone();
+                let mut branch = tx.branches[index].clone();
+                let action = branch.action.clone();
+                tasks.spawn(async move {
+                    let succeeded = invoker
+                        .invoke_with_options(&action, &branch.payload, &options)
+                        .await
+                        .is_ok();
+                    if succeeded {
+                        branch.status = BranchStatus::Succeeded;
+                        branch.next_retry_millis = None;
+                    } else {
+                        branch.status = BranchStatus::Failed;
+                        record_branch_failure(
+                            &mut branch,
+                            "branch_call_failed".to_owned(),
+                            retry_backoff_millis,
+                            max_retry_backoff_millis,
+                        );
+                        notify_branch_failure(
+                            &invoker,
+                            &gid,
+                            TransactionStatus::Succeeding,
+                            &branch,
+                            &action,
+                        )
+                        .await;
+                    }
+                    (index, branch, succeeded)
+                });
+            }
+
+            let mut failed = false;
+            while let Some(result) = tasks.join_next().await {
+                let (index, branch, succeeded) =
+                    result.context("concurrent Message branch task failed")?;
+                tx.branches[index] = branch;
+                if !succeeded {
+                    failed = true;
+                    let barrier =
+                        BranchBarrier::new(&tx.gid, &tx.branches[index].id, "message");
+                    self.store.release_barrier(&barrier).await?;
+                }
+            }
+            tx.status = if failed {
+                TransactionStatus::Succeeding
+            } else {
+                TransactionStatus::Succeeded
+            };
+            self.persist_transaction(&mut tx).await?;
+            return Ok(tx);
+        }
         for branch in &mut tx.branches {
             if branch.status == BranchStatus::Succeeded {
                 continue;
@@ -4865,12 +4962,19 @@ fn append_dynamic_branch(tx: &mut Transaction, branch: Branch) -> anyhow::Result
     Ok(())
 }
 
-/// Validates the execution DAG used by a concurrent Saga.
+/// Validates concurrent execution options and the dependency DAG used by Saga.
 pub fn validate_saga_dependencies(transaction: &Transaction) -> anyhow::Result<()> {
     if transaction.kind != TransactionKind::Saga {
         anyhow::ensure!(
-            !transaction.options.concurrent,
-            "options.concurrent is only supported for Saga transactions"
+            transaction.kind == TransactionKind::Message || !transaction.options.concurrent,
+            "options.concurrent is only supported for Saga and Message transactions"
+        );
+        anyhow::ensure!(
+            transaction
+                .branches
+                .iter()
+                .all(|branch| branch.dependencies.is_empty()),
+            "branch dependencies are only supported for Saga transactions"
         );
         return Ok(());
     }
@@ -6959,6 +7063,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_message_delivers_all_branches_in_parallel() {
+        let invoker = ConcurrentSagaInvoker::default();
+        let max_active = Arc::clone(&invoker.max_active);
+        let dtm = Dtm::with_invoker(InMemoryTransactionStore::new(), invoker);
+        let mut message = Transaction::message(
+            "gid-message-concurrent",
+            vec![
+                Branch::message("first", "http://events/first", serde_json::json!({})),
+                Branch::message("second", "http://events/second", serde_json::json!({})),
+            ],
+        );
+        message.options.concurrent = true;
+        dtm.submit(message).await.expect("submit concurrent message");
+
+        let dispatched = dtm
+            .dispatch_message("gid-message-concurrent")
+            .await
+            .expect("dispatch concurrent message");
+
+        assert_eq!(dispatched.status, TransactionStatus::Succeeded);
+        assert!(dispatched
+            .branches
+            .iter()
+            .all(|branch| branch.status == BranchStatus::Succeeded));
+        assert!(max_active.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_message_retries_only_the_failed_branch() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dtm = Dtm::with_invoker(
+            InMemoryTransactionStore::new(),
+            FailingOnceInvoker {
+                calls: Arc::clone(&calls),
+            },
+        );
+        let mut message = Transaction::message(
+            "gid-message-concurrent-retry",
+            vec![
+                Branch::message("first", "http://events/first", serde_json::json!({})),
+                Branch::message("second", "http://events/second", serde_json::json!({})),
+            ],
+        );
+        message.options.concurrent = true;
+        dtm.submit(message).await.expect("submit concurrent message");
+
+        let failed = dtm
+            .dispatch_message("gid-message-concurrent-retry")
+            .await
+            .expect("dispatch with one failure");
+        assert_eq!(failed.status, TransactionStatus::Succeeding);
+        assert_eq!(
+            failed
+                .branches
+                .iter()
+                .filter(|branch| branch.status == BranchStatus::Failed)
+                .count(),
+            1
+        );
+        assert_eq!(
+            failed
+                .branches
+                .iter()
+                .filter(|branch| branch.status == BranchStatus::Succeeded)
+                .count(),
+            1
+        );
+
+        let recovered = dtm
+            .dispatch_message("gid-message-concurrent-retry")
+            .await
+            .expect("retry failed concurrent branch");
+        assert_eq!(recovered.status, TransactionStatus::Succeeded);
+        assert!(recovered
+            .branches
+            .iter()
+            .all(|branch| branch.status == BranchStatus::Succeeded));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
     async fn delayed_message_persists_submit_decision_without_early_delivery() {
         let calls = Arc::new(AtomicUsize::new(0));
         let store = InMemoryTransactionStore::new();
@@ -6970,12 +7155,20 @@ mod tests {
         );
         let mut message = Transaction::message(
             "gid-message-delay",
-            vec![Branch::message(
-                "publish",
-                "http://events/publish",
-                serde_json::json!({}),
-            )],
+            vec![
+                Branch::message(
+                    "publish-primary",
+                    "http://events/publish-primary",
+                    serde_json::json!({}),
+                ),
+                Branch::message(
+                    "publish-secondary",
+                    "http://events/publish-secondary",
+                    serde_json::json!({}),
+                ),
+            ],
         );
+        message.options.concurrent = true;
         message.options.delay_millis = Some(60_000);
         let dispatch_at = message.created_at_millis + 60_000;
         dtm.submit(message).await.expect("submit delayed message");

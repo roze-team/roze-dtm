@@ -41,4 +41,15 @@ await compat.submit({
   payloads: [{}, {}],
   custom_data: concurrentSagaCustomData({ 1: [0] }),
 });
+
+await compat.submit({
+  gid: "message-concurrent",
+  trans_type: "msg",
+  concurrent: true,
+  steps: [
+    { action: "https://analytics.example.com/order" },
+    { action: "https://notification.example.com/order" },
+  ],
+  payloads: [{ order_id: "42" }, { order_id: "42" }],
+});
 ```

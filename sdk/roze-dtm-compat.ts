@@ -5,7 +5,7 @@ export interface CompatTransactionRequest {
   gid: string; trans_type: CompatTransactionType;
   steps?: Array<Record<string, string>>; payloads?: JsonValue[];
   timeout_to_fail?: number; rollback_reason?: string; custom_data?: string;
-  query_prepared?: string; wait_result?: boolean; retry_interval?: number;
+  query_prepared?: string; wait_result?: boolean; concurrent?: boolean; retry_interval?: number;
   request_timeout?: number; retry_limit?: number; branch_headers?: Record<string, string>;
   req_extra?: Record<string, string>;
 }

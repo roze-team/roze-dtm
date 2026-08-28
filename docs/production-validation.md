@@ -36,7 +36,7 @@ HTTP、JSON-RPC 和 gRPC 兼容协议需要使用固定上游客户端版本执�
 
 当前状态：protobuf、OpenAPI 3.1、Rust/TypeScript/JavaScript 客户端合同和源码测试已存在；OpenAPI 已通过 Router 全覆盖检查及标准规范校验。真实 Go/Rust/TypeScript/JavaScript 跨语言互操作仍未执行。
 
-并发 Saga 的源码合同覆盖依赖 DAG 校验、同层并发、后继等待和逆依赖补偿；HTTP 兼容层映射上游 `custom_data.concurrent/orders`。受当前禁编译要求约束，尚未执行这些 Rust 测试及真实分支故障注入，因此该新增能力的运行证据仍为 `inconclusive`。
+并发 Saga 的源码合同覆盖依赖 DAG 校验、同层并发、后继等待和逆依赖补偿；HTTP 兼容层映射上游 `custom_data.concurrent/orders`。并发 Message 的源码合同覆盖同时投递、部分失败保留成功结果、仅重试失败分支，以及与延迟投递组合时到期前零调用；HTTP/JSON-RPC 兼容层映射上游请求顶层 `concurrent`。受当前禁编译要求约束，尚未执行这些 Rust 测试及真实分支故障注入，因此新增能力的运行证据仍为 `inconclusive`。
 
 延迟 Message 的源码合同覆盖提交决策先持久化、到期前零分支调用、绝对恢复时间和到期后正常投递；HTTP/JSON-RPC/gRPC 兼容请求共享 `custom_data.delay` 秒到毫秒映射。受当前禁编译要求约束，Rust 测试及真实重启跨越投递点的验证尚未执行，状态为 `inconclusive`。
 
