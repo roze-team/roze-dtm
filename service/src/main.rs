@@ -912,6 +912,13 @@ async fn main() -> anyhow::Result<()> {
                             .await
                         {
                             Ok(recovered) if !recovered.is_empty() => {
+                                for transaction in &recovered {
+                                    record_dtm_transition(
+                                        &DTM_METRICS,
+                                        "dtm.recovery.completed",
+                                        transaction,
+                                    );
+                                }
                                 tracing::info!(
                                     event = "dtm.recovery.completed",
                                     recovered_count = recovered.len(),
@@ -1052,8 +1059,49 @@ async fn health() -> HttpResponse {
     ok_response("ok")
 }
 
+static DTM_METRICS: LazyLock<roze_metrics::MetricRegistry> =
+    LazyLock::new(roze_metrics::MetricRegistry::new);
+
 async fn metrics() -> String {
-    roze_metrics::http_metrics()
+    let mut output = roze_metrics::http_metrics();
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str("# TYPE roze_dtm_metrics_registry_available gauge\nroze_dtm_metrics_registry_available 1\n");
+    output.push_str(&DTM_METRICS.render());
+    output
+}
+
+fn record_dtm_transition(
+    registry: &roze_metrics::MetricRegistry,
+    operation: &'static str,
+    transaction: &Transaction,
+) {
+    let kind = kind_name(transaction.kind);
+    registry.inc_counter(
+        "roze_dtm_transaction_transitions_total",
+        roze_metrics::MetricLabels::new()
+            .insert("kind", kind)
+            .insert("status", status_name(transaction.status))
+            .insert("operation", operation),
+        1,
+    );
+    for branch in &transaction.branches {
+        registry.inc_counter(
+            "roze_dtm_branch_state_observations_total",
+            roze_metrics::MetricLabels::new()
+                .insert("kind", kind)
+                .insert("status", branch_status_name(branch.status)),
+            1,
+        );
+        if branch.next_retry_millis.is_some() {
+            registry.inc_counter(
+                "roze_dtm_retry_scheduled_observations_total",
+                roze_metrics::MetricLabels::new().insert("kind", kind),
+                1,
+            );
+        }
+    }
 }
 
 async fn compat_version(State(state): State<ControlState>) -> HttpResponse {
@@ -1484,8 +1532,24 @@ async fn compat_admin_operation(
         state.dtm.reset_retry(gid).await
     };
     match result {
-        Ok(_) => compat_response(serde_json::json!({"dtm_result": "SUCCESS"})),
-        Err(_) => compat_failure("administrative operation failed"),
+        Ok(transaction) => {
+            let event = if force_stop {
+                "dtm.compat.http.force_stop"
+            } else {
+                "dtm.compat.http.reset_retry"
+            };
+            audit_transition(&state.audit_history, event, &transaction);
+            compat_response(serde_json::json!({"dtm_result": "SUCCESS"}))
+        }
+        Err(_) => {
+            let event = if force_stop {
+                "dtm.compat.http.force_stop"
+            } else {
+                "dtm.compat.http.reset_retry"
+            };
+            audit_compat_failure(&state.audit_history, event, Some(gid));
+            compat_failure("administrative operation failed")
+        }
     }
 }
 
@@ -1510,12 +1574,33 @@ async fn compat_reset_retry_batch(
         .reset_retry_batch_after(timeout_millis, limit)
         .await
     {
-        Ok((reset, has_remaining)) => compat_response(serde_json::json!({
-            "succeed_count": reset.len(),
-            "has_remaining": has_remaining,
-            "dtm_result": "SUCCESS"
-        })),
-        Err(_) => compat_failure("batch retry reset failed"),
+        Ok((reset, has_remaining)) => {
+            for transaction in &reset {
+                record_dtm_transition(
+                    &DTM_METRICS,
+                    "dtm.compat.http.reset_retry_batch",
+                    transaction,
+                );
+            }
+            audit_batch_operation(
+                &state.audit_history,
+                "dtm.compat.http.reset_retry_batch",
+                reset.len(),
+            );
+            compat_response(serde_json::json!({
+                "succeed_count": reset.len(),
+                "has_remaining": has_remaining,
+                "dtm_result": "SUCCESS"
+            }))
+        }
+        Err(_) => {
+            audit_compat_failure(
+                &state.audit_history,
+                "dtm.compat.http.reset_retry_batch",
+                None,
+            );
+            compat_failure("batch retry reset failed")
+        }
     }
 }
 
@@ -1535,8 +1620,26 @@ async fn compat_subscribe(
         .subscribe_topic(&query.topic, &query.url, &query.remark)
         .await
     {
-        Ok(_) => compat_response(serde_json::json!({"dtm_result": "SUCCESS"})),
-        Err(_) => compat_failure("topic subscription failed"),
+        Ok(_) => {
+            audit_resource_operation(
+                &state.audit_history,
+                "dtm.compat.http.subscribe",
+                "topic",
+                &query.topic,
+                "success",
+            );
+            compat_response(serde_json::json!({"dtm_result": "SUCCESS"}))
+        }
+        Err(_) => {
+            audit_resource_operation(
+                &state.audit_history,
+                "dtm.compat.http.subscribe",
+                "topic",
+                &query.topic,
+                "failed",
+            );
+            compat_failure("topic subscription failed")
+        }
     }
 }
 
@@ -1549,8 +1652,26 @@ async fn compat_unsubscribe(
         return unauthorized_response();
     }
     match state.dtm.unsubscribe_topic(&query.topic, &query.url).await {
-        Ok(_) => compat_response(serde_json::json!({"dtm_result": "SUCCESS"})),
-        Err(_) => compat_failure("topic unsubscription failed"),
+        Ok(_) => {
+            audit_resource_operation(
+                &state.audit_history,
+                "dtm.compat.http.unsubscribe",
+                "topic",
+                &query.topic,
+                "success",
+            );
+            compat_response(serde_json::json!({"dtm_result": "SUCCESS"}))
+        }
+        Err(_) => {
+            audit_resource_operation(
+                &state.audit_history,
+                "dtm.compat.http.unsubscribe",
+                "topic",
+                &query.topic,
+                "failed",
+            );
+            compat_failure("topic unsubscription failed")
+        }
     }
 }
 
@@ -1563,9 +1684,36 @@ async fn compat_delete_topic(
         return unauthorized_response();
     }
     match state.dtm.delete_topic(&path.topic_name).await {
-        Ok(true) => compat_response(serde_json::json!({"dtm_result": "SUCCESS"})),
-        Ok(false) => compat_failure("topic not found"),
-        Err(_) => compat_failure("topic deletion failed"),
+        Ok(true) => {
+            audit_resource_operation(
+                &state.audit_history,
+                "dtm.compat.http.delete_topic",
+                "topic",
+                &path.topic_name,
+                "success",
+            );
+            compat_response(serde_json::json!({"dtm_result": "SUCCESS"}))
+        }
+        Ok(false) => {
+            audit_resource_operation(
+                &state.audit_history,
+                "dtm.compat.http.delete_topic",
+                "topic",
+                &path.topic_name,
+                "not_found",
+            );
+            compat_failure("topic not found")
+        }
+        Err(_) => {
+            audit_resource_operation(
+                &state.audit_history,
+                "dtm.compat.http.delete_topic",
+                "topic",
+                &path.topic_name,
+                "failed",
+            );
+            compat_failure("topic deletion failed")
+        }
     }
 }
 
@@ -1661,9 +1809,24 @@ async fn compat_prepare_workflow(
         return unauthorized_response();
     }
     request.trans_type = "workflow".to_owned();
+    let gid = request.gid.clone();
     match compat_apply(&state, request, CompatOperation::Prepare).await {
-        Ok(transaction) => compat_response(compat_workflow_response(&transaction)),
-        Err(_) => compat_failure("workflow preparation failed"),
+        Ok(transaction) => {
+            audit_transition(
+                &state.audit_history,
+                "dtm.compat.http.prepare_workflow",
+                &transaction,
+            );
+            compat_response(compat_workflow_response(&transaction))
+        }
+        Err(_) => {
+            audit_compat_failure(
+                &state.audit_history,
+                "dtm.compat.http.prepare_workflow",
+                Some(&gid),
+            );
+            compat_failure("workflow preparation failed")
+        }
     }
 }
 
@@ -1725,6 +1888,22 @@ enum CompatOperation {
     Abort,
 }
 
+impl CompatOperation {
+    const fn event(self, protocol: CompatProtocol) -> &'static str {
+        match (protocol, self) {
+            (CompatProtocol::Http, Self::Prepare) => "dtm.compat.http.prepare",
+            (CompatProtocol::Http, Self::Submit) => "dtm.compat.http.submit",
+            (CompatProtocol::Http, Self::Abort) => "dtm.compat.http.abort",
+            (CompatProtocol::JsonRpc, Self::Prepare) => "dtm.compat.json_rpc.prepare",
+            (CompatProtocol::JsonRpc, Self::Submit) => "dtm.compat.json_rpc.submit",
+            (CompatProtocol::JsonRpc, Self::Abort) => "dtm.compat.json_rpc.abort",
+            (CompatProtocol::Grpc, Self::Prepare) => "dtm.compat.grpc.prepare",
+            (CompatProtocol::Grpc, Self::Submit) => "dtm.compat.grpc.submit",
+            (CompatProtocol::Grpc, Self::Abort) => "dtm.compat.grpc.abort",
+        }
+    }
+}
+
 async fn compat_write(
     state: &ControlState,
     headers: &HeaderMap,
@@ -1735,11 +1914,15 @@ async fn compat_write(
         return unauthorized_response();
     }
     let gid = request.gid.clone();
+    let event = operation.event(request.protocol);
     let result = compat_apply(state, request, operation).await;
     match result {
-        Ok(_) => compat_response(serde_json::json!({"dtm_result": "SUCCESS"})),
+        Ok(transaction) => {
+            audit_transition(&state.audit_history, event, &transaction);
+            compat_response(serde_json::json!({"dtm_result": "SUCCESS"}))
+        }
         Err(_) => {
-            tracing::warn!(event = "dtm.compat.failed", gid, error_kind = "compat_operation", "DTM compatibility operation failed");
+            audit_compat_failure(&state.audit_history, event, Some(&gid));
             compat_failure("compatibility operation failed")
         }
     }
@@ -1924,8 +2107,22 @@ async fn compat_register_branch(
         Err(_) => return compat_failure("invalid branch registration"),
     };
     match apply_compat_registration(&state, &gid, registration).await {
-        Ok(_) => compat_response(serde_json::json!({"dtm_result": "SUCCESS"})),
-        Err(_) => compat_failure("branch registration failed"),
+        Ok(transaction) => {
+            audit_transition(
+                &state.audit_history,
+                "dtm.compat.http.register_branch",
+                &transaction,
+            );
+            compat_response(serde_json::json!({"dtm_result": "SUCCESS"}))
+        }
+        Err(_) => {
+            audit_compat_failure(
+                &state.audit_history,
+                "dtm.compat.http.register_branch",
+                Some(&gid),
+            );
+            compat_failure("branch registration failed")
+        }
     }
 }
 
@@ -2032,9 +2229,18 @@ async fn json_rpc(
             match serde_json::from_value::<CompatTransactionRequest>(request.params) {
                 Ok(mut params) => {
                     params.protocol = CompatProtocol::JsonRpc;
-                    compat_apply(&state, params, operation)
-                    .await
-                    .map(|_| serde_json::json!({}))
+                    let event = operation.event(params.protocol);
+                    let gid = params.gid.clone();
+                    match compat_apply(&state, params, operation).await {
+                        Ok(transaction) => {
+                            audit_transition(&state.audit_history, event, &transaction);
+                            Ok(serde_json::json!({}))
+                        }
+                        Err(error) => {
+                            audit_compat_failure(&state.audit_history, event, Some(&gid));
+                            Err(error)
+                        }
+                    }
                 }
                 Err(error) => Err(error.into()),
             }
@@ -2045,9 +2251,24 @@ async fn json_rpc(
                     let gid = params.gid.clone();
                     match compat_registration_from_request(&state, params) {
                         Ok(registration) => {
-                            apply_compat_registration(&state, &gid, registration)
-                            .await
-                            .map(|_| serde_json::json!({}))
+                            match apply_compat_registration(&state, &gid, registration).await {
+                                Ok(transaction) => {
+                                    audit_transition(
+                                        &state.audit_history,
+                                        "dtm.compat.json_rpc.register_branch",
+                                        &transaction,
+                                    );
+                                    Ok(serde_json::json!({}))
+                                }
+                                Err(error) => {
+                                    audit_compat_failure(
+                                        &state.audit_history,
+                                        "dtm.compat.json_rpc.register_branch",
+                                        Some(&gid),
+                                    );
+                                    Err(error)
+                                }
+                            }
                         }
                         Err(error) => Err(error),
                     }
@@ -2422,6 +2643,9 @@ async fn recover_all(State(state): State<ControlState>, headers: HeaderMap) -> H
     match state.dtm.tick_recover_once().await {
         Ok(recovered) => {
             let count = recovered.len();
+            for transaction in &recovered {
+                record_dtm_transition(&DTM_METRICS, "dtm.recovery.tick", transaction);
+            }
             roze_log::audit_info!(
                 event = "dtm.recovery.tick",
                 actor_kind = "control_token",
@@ -3001,6 +3225,17 @@ const fn status_name(status: TransactionStatus) -> &'static str {
     }
 }
 
+const fn branch_status_name(status: BranchStatus) -> &'static str {
+    match status {
+        BranchStatus::Pending => "pending",
+        BranchStatus::Running => "running",
+        BranchStatus::Compensating => "compensating",
+        BranchStatus::Succeeded => "succeeded",
+        BranchStatus::Failed => "failed",
+        BranchStatus::Skipped => "skipped",
+    }
+}
+
 const fn compat_workflow_status_name(status: TransactionStatus) -> &'static str {
     match status {
         TransactionStatus::Submitted
@@ -3025,6 +3260,7 @@ fn audit_transition(
     event: &'static str,
     transaction: &Transaction,
 ) {
+    record_dtm_transition(&DTM_METRICS, event, transaction);
     if transaction.branches.iter().any(|branch| {
         matches!(
             branch.status,
@@ -3065,6 +3301,72 @@ fn audit_transition(
             Some(status_name(transaction.status)),
         );
     }
+}
+
+fn audit_compat_failure(
+    history: &DashboardAuditHistory,
+    event: &'static str,
+    resource_id: Option<&str>,
+) {
+    roze_log::audit_warn!(
+        event = event,
+        actor_kind = "control_token",
+        resource_type = "distributed_transaction",
+        operation = event,
+        outcome = "failed",
+        error_kind = "compat_operation_failed",
+        "DTM compatibility operation failed"
+    );
+    history.record(event, "failed", resource_id, None);
+}
+
+fn audit_batch_operation(
+    history: &DashboardAuditHistory,
+    event: &'static str,
+    transaction_count: usize,
+) {
+    roze_log::audit_info!(
+        event = event,
+        actor_kind = "control_token",
+        resource_type = "distributed_transaction_batch",
+        operation = event,
+        outcome = "success",
+        transaction_count,
+        "DTM batch control operation completed"
+    );
+    history.record(event, "success", None, None);
+}
+
+fn audit_resource_operation(
+    history: &DashboardAuditHistory,
+    event: &'static str,
+    resource_type: &'static str,
+    resource_id: &str,
+    outcome: &'static str,
+) {
+    if outcome == "success" {
+        roze_log::audit_info!(
+            event = event,
+            actor_kind = "control_token",
+            resource_type = resource_type,
+            resource_id = resource_id,
+            operation = event,
+            outcome = outcome,
+            "DTM control resource operation completed"
+        );
+    } else {
+        roze_log::audit_warn!(
+            event = event,
+            actor_kind = "control_token",
+            resource_type = resource_type,
+            resource_id = resource_id,
+            operation = event,
+            outcome = outcome,
+            error_kind = "control_resource_operation_failed",
+            "DTM control resource operation failed"
+        );
+    }
+    history.record(event, outcome, Some(resource_id), None);
 }
 
 fn operation_error(
@@ -3672,6 +3974,42 @@ mod tests {
         .expect("upstream filters");
         assert_eq!(response["transactions"][0]["trans_type"], "msg");
         assert_eq!(response["transactions"][0]["status"], "succeed");
+    }
+
+    #[test]
+    fn dtm_metrics_use_bounded_labels_and_redact_transaction_data() {
+        let mut branch = Branch::tcc_try(
+            "secret-branch-id",
+            "http://inventory/try?token=secret",
+            "http://inventory/confirm",
+            "http://inventory/cancel",
+            serde_json::json!({"card": "4111111111111111"}),
+        );
+        branch.status = BranchStatus::Failed;
+        branch.next_retry_millis = Some(42_000);
+        let mut transaction = Transaction::tcc("secret-gid", vec![branch]);
+        transaction.status = TransactionStatus::Aborting;
+
+        let registry = roze_metrics::MetricRegistry::new();
+        record_dtm_transition(&registry, "dtm.tcc.cancel", &transaction);
+        let metrics = registry.render();
+        assert!(metrics.contains(
+            "roze_dtm_transaction_transitions_total{kind=\"tcc\",operation=\"dtm.tcc.cancel\",status=\"aborting\"} 1"
+        ));
+        assert!(metrics.contains(
+            "roze_dtm_branch_state_observations_total{kind=\"tcc\",status=\"failed\"} 1"
+        ));
+        assert!(metrics.contains(
+            "roze_dtm_retry_scheduled_observations_total{kind=\"tcc\"} 1"
+        ));
+        for secret in [
+            "secret-gid",
+            "secret-branch-id",
+            "inventory",
+            "4111111111111111",
+        ] {
+            assert!(!metrics.contains(secret));
+        }
     }
 
     #[test]

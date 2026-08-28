@@ -10,7 +10,7 @@
 | Saga | 已支持核心 | 顺序执行、依赖 DAG 分层并发、逆依赖并发补偿、重试与超时恢复；真实并发故障注入待补 |
 | 存储 | 已支持核心 | Memory、SQLite、PostgreSQL、MySQL、Redis standalone/Cluster；Redis 真实故障证据待补 |
 | 高可用恢复 | 已支持 | 持久化租约保证同一时刻只有一个恢复 worker 推进事务 |
-| 控制面 | 已支持 | Roze HTTP、数字响应信封、鉴权、健康检查、指标与审计事件 |
+| 控制面 | 已支持 | Roze HTTP、数字响应信封、鉴权、健康检查、HTTP/RPC 与低基数 DTM 业务指标、审计事件 |
 | 重试告警 | 已支持核心 | dtm-labs AlertWebHook 负载、顺序/并发失败阈值、超时与脱敏；真实 HTTPS 故障矩阵待补 |
 | DTM HTTP/JSON-RPC/gRPC 兼容 | 已支持核心 | 9 个 gRPC 方法、逐事务 timeout/retry/Header 及 WaitResult 异步调度；gRPC 互操作待补 |
 | XA | 部分支持 | 已有协调生命周期、动态分支、可信 phase-2 参数、MySQL/PostgreSQL Rust 资源管理器、启发式决策记录与 prepared 对账；真实数据库崩溃恢复矩阵待补 |

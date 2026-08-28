@@ -79,7 +79,7 @@ Authorization: Bearer <ROZE_DTM_CONTROL_TOKEN>
 - `GET /dashboard`：返回参考 Roze Admin Workspace/Resource Page 视觉的静态管理页面；页面本身不包含受保护数据，管理动作要求令牌和二次确认。
 - `GET /openapi.json`：返回覆盖原生、dtm-labs 兼容、管理和运维端点的 OpenAPI 3.1 合同。
 - `GET /healthz`、`GET /startupz`、`GET /readyz`：运行状态探针。
-- `GET /metrics`：Prometheus 指标。
+- `GET /metrics`：Prometheus 指标。除 Roze HTTP/RPC 指标外，包含固定内存的 DTM registry 可用性、事务状态转换计数、分支状态观察计数和待重试观察计数；抓取不扫描事务存储。只允许事务类型、状态和固定操作名等低基数标签，禁止使用 GID、branch id、URL、payload、Header 或错误正文。
 
 所有业务响应使用 Roze 数字信封：成功 `code: 0`，错误 code 与 HTTP 状态一致。查询参数支持 `gid`、`kind`、`status`、`offset`、`limit`；默认 limit 为 50，最大为 200。
 

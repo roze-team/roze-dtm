@@ -43,6 +43,7 @@ await check("operations:metrics", async () => {
   metricsText = await response.text();
   assert(response.status === 200, `/metrics returned HTTP ${response.status}`);
   assert(!metricsText.includes(token), "metrics response exposed the control token");
+  assert(metricsText.includes("roze_dtm_metrics_registry_available 1"), "DTM metrics registry is unavailable");
   return `${metricsText.length} bytes`;
 });
 

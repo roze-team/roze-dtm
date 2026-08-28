@@ -80,9 +80,21 @@ impl Dtm for DtmGrpcService {
         };
         let registration = crate::compat_registration_from_request(&self.state, registration)
             .map_err(|_| bad_request("invalid branch registration", &context))?;
-        crate::apply_compat_registration(&self.state, &gid, registration)
+        let transaction = crate::apply_compat_registration(&self.state, &gid, registration)
             .await
-            .map_err(|_| operation_failed("branch registration failed", &context))?;
+            .map_err(|_| {
+                crate::audit_compat_failure(
+                    &self.state.audit_history,
+                    "dtm.compat.grpc.register_branch",
+                    Some(&gid),
+                );
+                operation_failed("branch registration failed", &context)
+            })?;
+        crate::audit_transition(
+            &self.state.audit_history,
+            "dtm.compat.grpc.register_branch",
+            &transaction,
+        );
         success((), &context)
     }
 
@@ -93,9 +105,22 @@ impl Dtm for DtmGrpcService {
         let context = authorize(&self.state, &request)?;
         let mut input = compat_request(request.into_inner(), &context)?;
         input.trans_type = "workflow".to_owned();
+        let gid = input.gid.clone();
         let transaction = crate::compat_apply(&self.state, input, CompatOperation::Prepare)
             .await
-            .map_err(|_| operation_failed("workflow preparation failed", &context))?;
+            .map_err(|_| {
+                crate::audit_compat_failure(
+                    &self.state.audit_history,
+                    "dtm.compat.grpc.prepare_workflow",
+                    Some(&gid),
+                );
+                operation_failed("workflow preparation failed", &context)
+            })?;
+        crate::audit_transition(
+            &self.state.audit_history,
+            "dtm.compat.grpc.prepare_workflow",
+            &transaction,
+        );
         let progresses = transaction
             .workflow_progresses
             .iter()
@@ -144,7 +169,23 @@ impl Dtm for DtmGrpcService {
             .dtm
             .subscribe_topic(&input.topic, &input.url, &input.remark)
             .await
-            .map_err(|_| operation_failed("topic subscription failed", &context))?;
+            .map_err(|_| {
+                crate::audit_resource_operation(
+                    &self.state.audit_history,
+                    "dtm.compat.grpc.subscribe",
+                    "topic",
+                    &input.topic,
+                    "failed",
+                );
+                operation_failed("topic subscription failed", &context)
+            })?;
+        crate::audit_resource_operation(
+            &self.state.audit_history,
+            "dtm.compat.grpc.subscribe",
+            "topic",
+            &input.topic,
+            "success",
+        );
         success((), &context)
     }
 
@@ -158,7 +199,23 @@ impl Dtm for DtmGrpcService {
             .dtm
             .unsubscribe_topic(&input.topic, &input.url)
             .await
-            .map_err(|_| operation_failed("topic unsubscription failed", &context))?;
+            .map_err(|_| {
+                crate::audit_resource_operation(
+                    &self.state.audit_history,
+                    "dtm.compat.grpc.unsubscribe",
+                    "topic",
+                    &input.topic,
+                    "failed",
+                );
+                operation_failed("topic unsubscription failed", &context)
+            })?;
+        crate::audit_resource_operation(
+            &self.state.audit_history,
+            "dtm.compat.grpc.unsubscribe",
+            "topic",
+            &input.topic,
+            "success",
+        );
         success((), &context)
     }
 
@@ -167,18 +224,42 @@ impl Dtm for DtmGrpcService {
         request: Request<DtmTopicRequest>,
     ) -> Result<Response<()>, Status> {
         let context = authorize(&self.state, &request)?;
+        let topic = request.into_inner().topic;
         let deleted = self
             .state
             .dtm
-            .delete_topic(&request.into_inner().topic)
+            .delete_topic(&topic)
             .await
-            .map_err(|_| operation_failed("topic deletion failed", &context))?;
+            .map_err(|_| {
+                crate::audit_resource_operation(
+                    &self.state.audit_history,
+                    "dtm.compat.grpc.delete_topic",
+                    "topic",
+                    &topic,
+                    "failed",
+                );
+                operation_failed("topic deletion failed", &context)
+            })?;
         if !deleted {
+            crate::audit_resource_operation(
+                &self.state.audit_history,
+                "dtm.compat.grpc.delete_topic",
+                "topic",
+                &topic,
+                "not_found",
+            );
             return Err(roze_rpc::rpc::status_from_error(
                 RozeError::NotFound("topic not found".to_owned()),
                 &context,
             ));
         }
+        crate::audit_resource_operation(
+            &self.state.audit_history,
+            "dtm.compat.grpc.delete_topic",
+            "topic",
+            &topic,
+            "success",
+        );
         success((), &context)
     }
 }
@@ -190,9 +271,15 @@ async fn apply_transaction(
 ) -> Result<Response<()>, Status> {
     let context = authorize(state, &request)?;
     let input = compat_request(request.into_inner(), &context)?;
-    crate::compat_apply(state, input, operation)
+    let gid = input.gid.clone();
+    let event = operation.event(input.protocol);
+    let transaction = crate::compat_apply(state, input, operation)
         .await
-        .map_err(|_| operation_failed("transaction operation failed", &context))?;
+        .map_err(|_| {
+            crate::audit_compat_failure(&state.audit_history, event, Some(&gid));
+            operation_failed("transaction operation failed", &context)
+        })?;
+    crate::audit_transition(&state.audit_history, event, &transaction);
     success((), &context)
 }
 
