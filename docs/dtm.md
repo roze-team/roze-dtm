@@ -21,8 +21,9 @@ application:
       - http://inventory:8080
       - http://account:8080
     store:
-      kind: sqlite
+      kind: postgres
       database_url: env://ROZE_DTM_DATABASE_URL
+      max_connections: 20
     max_attempts: 5
     retry_backoff_ms: 1000
     max_retry_backoff_ms: 30000
@@ -35,7 +36,7 @@ application:
 Action、Confirm、Cancel 和 Compensate URL；实际分支调用会再次校验，并禁止
 HTTP 重定向，避免通过分支地址或重定向访问未授权的内部端点。
 
-生产环境禁止 `store.kind: memory`。`control_token` 至少 32 字节；`worker_id` 必须在同一部署中唯一。恢复租约时长至少是恢复周期的两倍。配置文件只保存 `env://` 引用，不保存明文密钥。
+生产环境禁止 `store.kind: memory`。持久化后端支持 `sqlite`、`postgres` 和 `mysql`；数据库 URL scheme 必须与 kind 一致，`max_connections` 范围为 1–1000。`control_token` 至少 32 字节；`worker_id` 必须在同一部署中唯一。恢复租约时长至少是恢复周期的两倍。配置文件只保存 `env://` 引用，不保存明文密钥。
 
 除健康、启动、就绪和指标接口外，所有 `/v1/**` 请求必须携带：
 
@@ -131,5 +132,4 @@ Saga 端点只接受 `SagaAction` 分支，并要求补偿地址。
 
 ## 当前边界
 
-已支持内存与 SQLite 存储、TCC/Saga 状态机、HTTP 分支调用、超时、重试、分支屏障、恢复租约、自动恢复 worker、原生 Roze HTTP 控制面和审计事件。PostgreSQL/MySQL/Redis 后端、跨进程外部租约后端、XA、二阶段消息和管理 Dashboard 仍属于后续扩展。
-
+已支持内存、SQLite、PostgreSQL 与 MySQL 存储、TCC/Saga 状态机、HTTP 分支调用、超时、重试、分支屏障、关系型数据库恢复租约、自动恢复 worker、原生 Roze HTTP 控制面和审计事件。Redis 后端、XA、二阶段消息、Workflow DSL 和管理 Dashboard 仍属于后续扩展。

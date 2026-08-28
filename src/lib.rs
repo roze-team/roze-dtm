@@ -6,7 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use sqlx::{Row, Sqlite, SqlitePool};
+use sqlx::{mysql::MySqlPool, postgres::PgPool, Row, Sqlite, SqlitePool};
 use tokio::sync::RwLock;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -668,35 +668,485 @@ impl TransactionStore for SqliteTransactionStore {
     ) -> anyhow::Result<bool> {
         let now = current_millis();
         let expires_at = now.saturating_add(ttl_millis);
-        let mut tx = self.pool.begin().await?;
-        let current: Option<(String, i64)> = sqlx::query_as(
-            "SELECT owner, expires_at_millis FROM roze_dtm_recovery_leases WHERE name = ?",
-        )
-        .bind(name)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if let Some((current_owner, current_expires_at)) = current {
-            if current_owner != owner && current_expires_at as u64 > now {
-                tx.commit().await?;
-                return Ok(false);
-            }
-        }
-        sqlx::query(
+        let renewed = sqlx::query(
             r#"
-            INSERT INTO roze_dtm_recovery_leases (name, owner, expires_at_millis)
+            UPDATE roze_dtm_recovery_leases
+            SET owner = ?, expires_at_millis = ?
+            WHERE name = ? AND (owner = ? OR expires_at_millis <= ?)
+            "#,
+        )
+        .bind(owner)
+        .bind(expires_at as i64)
+        .bind(name)
+        .bind(owner)
+        .bind(now as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if renewed == 1 {
+            return Ok(true);
+        }
+
+        let inserted = sqlx::query(
+            r#"
+            INSERT OR IGNORE INTO roze_dtm_recovery_leases (name, owner, expires_at_millis)
             VALUES (?, ?, ?)
-            ON CONFLICT(name) DO UPDATE SET
-                owner = excluded.owner,
-                expires_at_millis = excluded.expires_at_millis
             "#,
         )
         .bind(name)
         .bind(owner)
         .bind(expires_at as i64)
-        .execute(&mut *tx)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(inserted == 1)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PostgresTransactionStore {
+    pool: PgPool,
+}
+
+impl PostgresTransactionStore {
+    pub async fn connect(database_url: &str) -> anyhow::Result<Self> {
+        let pool = PgPool::connect(database_url).await?;
+        let store = Self { pool };
+        store.migrate().await?;
+        Ok(store)
+    }
+
+    pub fn from_pool(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn migrate(&self) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS roze_dtm_transactions (
+                gid VARCHAR(128) PRIMARY KEY NOT NULL,
+                payload TEXT NOT NULL,
+                updated_at_millis BIGINT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
         .await?;
-        tx.commit().await?;
-        Ok(true)
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS roze_dtm_barriers (
+                barrier_key VARCHAR(512) PRIMARY KEY NOT NULL,
+                gid VARCHAR(128) NOT NULL,
+                branch_id VARCHAR(128) NOT NULL,
+                op VARCHAR(32) NOT NULL,
+                created_at_millis BIGINT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS roze_dtm_recovery_leases (
+                name VARCHAR(191) PRIMARY KEY NOT NULL,
+                owner VARCHAR(128) NOT NULL,
+                expires_at_millis BIGINT NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl TransactionStore for PostgresTransactionStore {
+    async fn insert_transaction(&self, tx: Transaction) -> anyhow::Result<()> {
+        let payload = serde_json::to_string(&tx)?;
+        let changed = sqlx::query(
+            r#"
+            INSERT INTO roze_dtm_transactions (gid, payload, updated_at_millis)
+            VALUES ($1, $2, $3)
+            ON CONFLICT(gid) DO NOTHING
+            "#,
+        )
+        .bind(&tx.gid)
+        .bind(payload)
+        .bind(tx.updated_at_millis as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            anyhow::bail!("transaction already exists: {}", tx.gid);
+        }
+        Ok(())
+    }
+
+    async fn get_transaction(&self, gid: &str) -> anyhow::Result<Option<Transaction>> {
+        let row = sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = $1")
+            .bind(gid)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| serde_json::from_str(row.get::<&str, _>("payload")).map_err(Into::into))
+            .transpose()
+    }
+
+    async fn update_transaction(&self, mut tx: Transaction) -> anyhow::Result<()> {
+        tx.updated_at_millis = current_millis();
+        let payload = serde_json::to_string(&tx)?;
+        sqlx::query(
+            r#"
+            INSERT INTO roze_dtm_transactions (gid, payload, updated_at_millis)
+            VALUES ($1, $2, $3)
+            ON CONFLICT(gid) DO UPDATE SET
+                payload = EXCLUDED.payload,
+                updated_at_millis = EXCLUDED.updated_at_millis
+            "#,
+        )
+        .bind(&tx.gid)
+        .bind(payload)
+        .bind(tx.updated_at_millis as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>> {
+        let rows =
+            sqlx::query("SELECT payload FROM roze_dtm_transactions ORDER BY updated_at_millis ASC")
+                .fetch_all(&self.pool)
+                .await?;
+        rows.into_iter()
+            .map(|row| serde_json::from_str(row.get::<&str, _>("payload")).map_err(Into::into))
+            .collect()
+    }
+
+    async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision> {
+        let key = barrier.key();
+        let mut transaction = self.pool.begin().await?;
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO roze_dtm_barriers
+                (barrier_key, gid, branch_id, op, created_at_millis)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT(barrier_key) DO NOTHING
+            "#,
+        )
+        .bind(&key)
+        .bind(&barrier.gid)
+        .bind(&barrier.branch_id)
+        .bind(&barrier.op)
+        .bind(current_millis() as i64)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if inserted == 0 {
+            transaction.commit().await?;
+            return Ok(BarrierDecision::SkipDuplicate);
+        }
+        if barrier.op == "try" {
+            let cancel_key = format!("{}:{}:cancel", barrier.gid, barrier.branch_id);
+            let cancelled: Option<(String,)> =
+                sqlx::query_as("SELECT barrier_key FROM roze_dtm_barriers WHERE barrier_key = $1")
+                    .bind(&cancel_key)
+                    .fetch_optional(&mut *transaction)
+                    .await?;
+            if cancelled.is_some() {
+                sqlx::query("DELETE FROM roze_dtm_barriers WHERE barrier_key = $1")
+                    .bind(&key)
+                    .execute(&mut *transaction)
+                    .await?;
+                transaction.commit().await?;
+                return Ok(BarrierDecision::SkipCancelledTry);
+            }
+        }
+        if barrier.op == "cancel" {
+            let try_key = format!("{}:{}:try", barrier.gid, barrier.branch_id);
+            let tried: Option<(String,)> =
+                sqlx::query_as("SELECT barrier_key FROM roze_dtm_barriers WHERE barrier_key = $1")
+                    .bind(&try_key)
+                    .fetch_optional(&mut *transaction)
+                    .await?;
+            if tried.is_none() {
+                transaction.commit().await?;
+                return Ok(BarrierDecision::SkipNullCompensation);
+            }
+        }
+        transaction.commit().await?;
+        Ok(BarrierDecision::Execute)
+    }
+
+    async fn release_barrier(&self, barrier: &BranchBarrier) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM roze_dtm_barriers WHERE barrier_key = $1")
+            .bind(barrier.key())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn try_acquire_recovery_lease(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl_millis: u64,
+    ) -> anyhow::Result<bool> {
+        let now = current_millis();
+        let expires_at = now.saturating_add(ttl_millis);
+        let renewed = sqlx::query(
+            r#"
+            UPDATE roze_dtm_recovery_leases
+            SET owner = $1, expires_at_millis = $2
+            WHERE name = $3 AND (owner = $4 OR expires_at_millis <= $5)
+            "#,
+        )
+        .bind(owner)
+        .bind(expires_at as i64)
+        .bind(name)
+        .bind(owner)
+        .bind(now as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if renewed == 1 {
+            return Ok(true);
+        }
+        let inserted = sqlx::query(
+            r#"
+            INSERT INTO roze_dtm_recovery_leases (name, owner, expires_at_millis)
+            VALUES ($1, $2, $3)
+            ON CONFLICT(name) DO NOTHING
+            "#,
+        )
+        .bind(name)
+        .bind(owner)
+        .bind(expires_at as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(inserted == 1)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MySqlTransactionStore {
+    pool: MySqlPool,
+}
+
+impl MySqlTransactionStore {
+    pub async fn connect(database_url: &str) -> anyhow::Result<Self> {
+        let pool = MySqlPool::connect(database_url).await?;
+        let store = Self { pool };
+        store.migrate().await?;
+        Ok(store)
+    }
+
+    pub fn from_pool(pool: MySqlPool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn migrate(&self) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS roze_dtm_transactions (
+                gid VARCHAR(128) PRIMARY KEY NOT NULL,
+                payload LONGTEXT NOT NULL,
+                updated_at_millis BIGINT NOT NULL
+            ) ENGINE=InnoDB
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS roze_dtm_barriers (
+                barrier_key VARCHAR(512) PRIMARY KEY NOT NULL,
+                gid VARCHAR(128) NOT NULL,
+                branch_id VARCHAR(128) NOT NULL,
+                op VARCHAR(32) NOT NULL,
+                created_at_millis BIGINT NOT NULL
+            ) ENGINE=InnoDB
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS roze_dtm_recovery_leases (
+                name VARCHAR(191) PRIMARY KEY NOT NULL,
+                owner VARCHAR(128) NOT NULL,
+                expires_at_millis BIGINT NOT NULL
+            ) ENGINE=InnoDB
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl TransactionStore for MySqlTransactionStore {
+    async fn insert_transaction(&self, tx: Transaction) -> anyhow::Result<()> {
+        let payload = serde_json::to_string(&tx)?;
+        let changed = sqlx::query(
+            r#"
+            INSERT IGNORE INTO roze_dtm_transactions (gid, payload, updated_at_millis)
+            VALUES (?, ?, ?)
+            "#,
+        )
+        .bind(&tx.gid)
+        .bind(payload)
+        .bind(tx.updated_at_millis as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if changed == 0 {
+            anyhow::bail!("transaction already exists: {}", tx.gid);
+        }
+        Ok(())
+    }
+
+    async fn get_transaction(&self, gid: &str) -> anyhow::Result<Option<Transaction>> {
+        let row = sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = ?")
+            .bind(gid)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| serde_json::from_str(row.get::<&str, _>("payload")).map_err(Into::into))
+            .transpose()
+    }
+
+    async fn update_transaction(&self, mut tx: Transaction) -> anyhow::Result<()> {
+        tx.updated_at_millis = current_millis();
+        let payload = serde_json::to_string(&tx)?;
+        sqlx::query(
+            r#"
+            INSERT INTO roze_dtm_transactions (gid, payload, updated_at_millis)
+            VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                payload = VALUES(payload),
+                updated_at_millis = VALUES(updated_at_millis)
+            "#,
+        )
+        .bind(&tx.gid)
+        .bind(payload)
+        .bind(tx.updated_at_millis as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>> {
+        let rows =
+            sqlx::query("SELECT payload FROM roze_dtm_transactions ORDER BY updated_at_millis ASC")
+                .fetch_all(&self.pool)
+                .await?;
+        rows.into_iter()
+            .map(|row| serde_json::from_str(row.get::<&str, _>("payload")).map_err(Into::into))
+            .collect()
+    }
+
+    async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision> {
+        let key = barrier.key();
+        let mut transaction = self.pool.begin().await?;
+        let inserted = sqlx::query(
+            r#"
+            INSERT IGNORE INTO roze_dtm_barriers
+                (barrier_key, gid, branch_id, op, created_at_millis)
+            VALUES (?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(&key)
+        .bind(&barrier.gid)
+        .bind(&barrier.branch_id)
+        .bind(&barrier.op)
+        .bind(current_millis() as i64)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if inserted == 0 {
+            transaction.commit().await?;
+            return Ok(BarrierDecision::SkipDuplicate);
+        }
+        if barrier.op == "try" {
+            let cancel_key = format!("{}:{}:cancel", barrier.gid, barrier.branch_id);
+            let cancelled: Option<(String,)> =
+                sqlx::query_as("SELECT barrier_key FROM roze_dtm_barriers WHERE barrier_key = ?")
+                    .bind(&cancel_key)
+                    .fetch_optional(&mut *transaction)
+                    .await?;
+            if cancelled.is_some() {
+                sqlx::query("DELETE FROM roze_dtm_barriers WHERE barrier_key = ?")
+                    .bind(&key)
+                    .execute(&mut *transaction)
+                    .await?;
+                transaction.commit().await?;
+                return Ok(BarrierDecision::SkipCancelledTry);
+            }
+        }
+        if barrier.op == "cancel" {
+            let try_key = format!("{}:{}:try", barrier.gid, barrier.branch_id);
+            let tried: Option<(String,)> =
+                sqlx::query_as("SELECT barrier_key FROM roze_dtm_barriers WHERE barrier_key = ?")
+                    .bind(&try_key)
+                    .fetch_optional(&mut *transaction)
+                    .await?;
+            if tried.is_none() {
+                transaction.commit().await?;
+                return Ok(BarrierDecision::SkipNullCompensation);
+            }
+        }
+        transaction.commit().await?;
+        Ok(BarrierDecision::Execute)
+    }
+
+    async fn release_barrier(&self, barrier: &BranchBarrier) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM roze_dtm_barriers WHERE barrier_key = ?")
+            .bind(barrier.key())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn try_acquire_recovery_lease(
+        &self,
+        name: &str,
+        owner: &str,
+        ttl_millis: u64,
+    ) -> anyhow::Result<bool> {
+        let now = current_millis();
+        let expires_at = now.saturating_add(ttl_millis);
+        let renewed = sqlx::query(
+            r#"
+            UPDATE roze_dtm_recovery_leases
+            SET owner = ?, expires_at_millis = ?
+            WHERE name = ? AND (owner = ? OR expires_at_millis <= ?)
+            "#,
+        )
+        .bind(owner)
+        .bind(expires_at as i64)
+        .bind(name)
+        .bind(owner)
+        .bind(now as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if renewed == 1 {
+            return Ok(true);
+        }
+        let inserted = sqlx::query(
+            r#"
+            INSERT IGNORE INTO roze_dtm_recovery_leases (name, owner, expires_at_millis)
+            VALUES (?, ?, ?)
+            "#,
+        )
+        .bind(name)
+        .bind(owner)
+        .bind(expires_at as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(inserted == 1)
     }
 }
 
@@ -1712,6 +2162,29 @@ mod tests {
         }
         assert_eq!(execute, 1);
         assert_eq!(duplicate, 31);
+    }
+
+    #[tokio::test]
+    async fn sqlite_recovery_lease_has_exactly_one_concurrent_owner() {
+        let store = SqliteTransactionStore::connect("sqlite::memory:")
+            .await
+            .expect("connect");
+        let mut tasks = Vec::new();
+        for index in 0..32 {
+            let store = store.clone();
+            tasks.push(tokio::spawn(async move {
+                store
+                    .try_acquire_recovery_lease("recovery-race", &format!("worker-{index}"), 10_000)
+                    .await
+                    .expect("lease")
+            }));
+        }
+
+        let mut acquired = 0;
+        for task in tasks {
+            acquired += usize::from(task.await.expect("join"));
+        }
+        assert_eq!(acquired, 1);
     }
 
     #[tokio::test]

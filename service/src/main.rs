@@ -4,8 +4,8 @@ use anyhow::Context as _;
 use http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use roze_dtm::{
     Branch, BranchKind, BranchStatus, BranchUrlPolicy, Dtm, DtmOptions, HttpBranchInvoker,
-    InMemoryTransactionStore, SqliteTransactionStore, Transaction, TransactionKind,
-    TransactionStatus, TransactionStore,
+    InMemoryTransactionStore, MySqlTransactionStore, PostgresTransactionStore,
+    SqliteTransactionStore, Transaction, TransactionKind, TransactionStatus, TransactionStore,
 };
 use roze_http::{
     rest::{self, HttpResponse, RestServer, RestService},
@@ -127,13 +127,11 @@ impl DtmConfig {
                 !production,
                 "application.dtm.store.kind=memory is forbidden in production"
             ),
-            StoreKind::Sqlite => anyhow::ensure!(
-                self.store
-                    .database_url
-                    .as_deref()
-                    .is_some_and(|url| !url.trim().is_empty()),
-                "application.dtm.store.database_url is required for sqlite"
-            ),
+            StoreKind::Sqlite => self.store.validate_url("sqlite", &["sqlite:"])?,
+            StoreKind::Postgres => self
+                .store
+                .validate_url("postgres", &["postgres://", "postgresql://"])?,
+            StoreKind::Mysql => self.store.validate_url("mysql", &["mysql://"])?,
         }
         Ok(())
     }
@@ -149,13 +147,46 @@ impl DtmConfig {
     }
 }
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoreConfig {
     #[serde(default)]
     kind: StoreKind,
     #[serde(default)]
     database_url: Option<String>,
+    #[serde(default = "default_store_max_connections")]
+    max_connections: u32,
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self {
+            kind: StoreKind::Memory,
+            database_url: None,
+            max_connections: default_store_max_connections(),
+        }
+    }
+}
+
+impl StoreConfig {
+    fn validate_url(&self, kind: &str, schemes: &[&str]) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=1_000).contains(&self.max_connections),
+            "application.dtm.store.max_connections must be between 1 and 1000"
+        );
+        let url = self
+            .database_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+            .with_context(|| {
+                format!("application.dtm.store.database_url is required for {kind}")
+            })?;
+        anyhow::ensure!(
+            schemes.iter().any(|scheme| url.starts_with(scheme)),
+            "application.dtm.store.database_url scheme does not match store kind {kind}"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -164,6 +195,8 @@ enum StoreKind {
     #[default]
     Memory,
     Sqlite,
+    Postgres,
+    Mysql,
 }
 
 type DtmRuntime = Dtm<Arc<dyn TransactionStore>, HttpBranchInvoker>;
@@ -256,18 +289,36 @@ async fn main() -> anyhow::Result<()> {
 
     let store: Arc<dyn TransactionStore> = match config.application.dtm.store.kind {
         StoreKind::Memory => Arc::new(InMemoryTransactionStore::new()),
-        StoreKind::Sqlite => Arc::new(
-            SqliteTransactionStore::connect(
-                config
-                    .application
-                    .dtm
-                    .store
-                    .database_url
-                    .as_deref()
-                    .context("validated sqlite database URL missing")?,
+        StoreKind::Sqlite => {
+            let pool = roze_sqlx::connect_sqlite(
+                store_url(&config.application.dtm.store)?,
+                config.application.dtm.store.max_connections,
             )
-            .await?,
-        ),
+            .await?;
+            let store = SqliteTransactionStore::from_pool(pool);
+            store.migrate().await?;
+            Arc::new(store)
+        }
+        StoreKind::Postgres => {
+            let pool = roze_sqlx::connect_postgres(
+                store_url(&config.application.dtm.store)?,
+                config.application.dtm.store.max_connections,
+            )
+            .await?;
+            let store = PostgresTransactionStore::from_pool(pool);
+            store.migrate().await?;
+            Arc::new(store)
+        }
+        StoreKind::Mysql => {
+            let pool = roze_sqlx::connect_mysql(
+                store_url(&config.application.dtm.store)?,
+                config.application.dtm.store.max_connections,
+            )
+            .await?;
+            let store = MySqlTransactionStore::from_pool(pool);
+            store.migrate().await?;
+            Arc::new(store)
+        }
     };
     let branch_url_policy =
         BranchUrlPolicy::from_allowed_origins(&config.application.dtm.allowed_branch_origins)?;
@@ -865,6 +916,17 @@ fn default_worker_id() -> String {
     "roze-dtm-local".to_string()
 }
 
+const fn default_store_max_connections() -> u32 {
+    10
+}
+
+fn store_url(config: &StoreConfig) -> anyhow::Result<&str> {
+    config
+        .database_url
+        .as_deref()
+        .context("validated DTM database URL missing")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,6 +948,29 @@ mod tests {
         assert!(config.validate(true).is_err());
         config.allowed_branch_origins = vec!["http://inventory".to_string()];
         config.validate(true).expect("valid production config");
+    }
+
+    #[test]
+    fn production_database_kinds_validate_url_scheme_and_pool_size() {
+        let mut config = DtmConfig {
+            allowed_branch_origins: vec!["http://inventory".to_string()],
+            ..DtmConfig::default()
+        };
+
+        config.store.kind = StoreKind::Postgres;
+        config.store.database_url = Some("postgres://dtm:secret@db/roze_dtm".to_string());
+        config.validate(false).expect("valid postgres config");
+
+        config.store.kind = StoreKind::Mysql;
+        config.store.database_url = Some("mysql://dtm:secret@db/roze_dtm".to_string());
+        config.validate(false).expect("valid mysql config");
+
+        config.store.database_url = Some("sqlite://roze-dtm.db".to_string());
+        assert!(config.validate(false).is_err());
+
+        config.store.database_url = Some("mysql://dtm:secret@db/roze_dtm".to_string());
+        config.store.max_connections = 0;
+        assert!(config.validate(false).is_err());
     }
 
     #[test]

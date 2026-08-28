@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: roze_dtm
+          POSTGRES_USER: roze
+          POSTGRES_PASSWORD: roze-test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U roze -d roze_dtm"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: roze_dtm
+          MYSQL_USER: roze
+          MYSQL_PASSWORD: roze-test
+          MYSQL_ROOT_PASSWORD: root-test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot-test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      ROZE_DTM_TEST_POSTGRES_URL: postgres://roze:roze-test@127.0.0.1:5432/roze_dtm
+      ROZE_DTM_TEST_MYSQL_URL: mysql://roze:roze-test@127.0.0.1:3306/roze_dtm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace

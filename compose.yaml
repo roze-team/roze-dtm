@@ -1,0 +1,29 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: roze_dtm
+      POSTGRES_USER: roze
+      POSTGRES_PASSWORD: roze-dtm-local
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U roze -d roze_dtm"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  dtm:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ROZE_DTM_CONTROL_TOKEN: local-control-token-change-me-00000000
+      ROZE_DTM_WORKER_ID: roze-dtm-compose-1
+      ROZE_DTM_DATABASE_URL: postgres://roze:roze-dtm-local@postgres:5432/roze_dtm
+    ports:
+      - "8090:8090"
+
+volumes:
+  postgres-data:

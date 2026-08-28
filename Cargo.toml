@@ -34,6 +34,7 @@ roze-log = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068
 roze-metrics = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 roze-result = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 roze-service = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
+roze-sqlx = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 
 [dependencies]
 anyhow.workspace = true

@@ -4,16 +4,27 @@ Roze 的独立分布式事务协调器，默认提供 TCC，并支持 Saga 工�
 
 ## 项目结构
 
-- `src/lib.rs`：DTM 核心库，包含 TCC/Saga 状态机、内存与 SQLite 存储、HTTP 分支调用和恢复逻辑。
+- `src/lib.rs`：DTM 核心库，包含 TCC/Saga 状态机、内存、SQLite、PostgreSQL、MySQL 存储、HTTP 分支调用和恢复逻辑。
 - `service/`：独立控制面服务。
 - `service/config.yaml`：开发环境示例配置，也是服务的默认配置。
 - `docs/dtm.md`：API、部署与安全契约。
+- `docs/roadmap.md`：参考 dtm-labs/dtm 的能力矩阵与 Roze 实施顺序。
 
 ## 验证
 
 ```bash
 cargo test --workspace
 ```
+
+设置以下变量后，工作区测试还会执行真实关系型数据库契约测试：
+
+```bash
+ROZE_DTM_TEST_POSTGRES_URL=postgres://user:password@localhost/roze_dtm
+ROZE_DTM_TEST_MYSQL_URL=mysql://user:password@localhost/roze_dtm
+cargo test --workspace
+```
+
+CI 会启动 PostgreSQL 和 MySQL，并强制执行这两组测试。
 
 ## 运行
 
@@ -24,6 +35,27 @@ cargo run -p roze-dtm-service
 ```
 
 也可以通过 `ROZE_CONFIG_PATH` 指定配置文件。生产环境必须使用持久化存储、独立控制令牌、唯一 worker id，并限制允许调用的分支来源；完整要求见 [DTM 服务契约](docs/dtm.md)。
+
+## 容器运行
+
+仓库提供 PostgreSQL 生产拓扑示例：
+
+```bash
+docker compose up --build
+```
+
+服务启动后监听 `http://127.0.0.1:8090`。Compose 中的令牌和数据库密码仅用于本地演示，部署前必须替换。生产配置模板位于 `service/config.production.yaml`。
+
+## 存储后端
+
+`application.dtm.store.kind` 支持：
+
+- `memory`：仅限开发和测试。
+- `sqlite`：单实例持久化。
+- `postgres`：推荐的生产后端，支持多实例恢复租约。
+- `mysql`：生产后端，支持多实例恢复租约。
+
+所有关系型后端会在启动时幂等创建事务、分支屏障和恢复租约表。连接由 Roze `roze-sqlx` 管理，可通过 `max_connections` 设置连接池上限。
 
 ## 上游同步
 

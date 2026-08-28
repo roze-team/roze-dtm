@@ -2188,6 +2188,7 @@ dependencies = [
  "roze-metrics",
  "roze-result",
  "roze-service",
+ "roze-sqlx",
  "serde",
  "serde_json",
  "tokio",
@@ -2419,6 +2420,17 @@ name = "roze-shutdown"
 version = "1.0.0"
 source = "git+https://github.com/roze-team/roze.git?rev=217274a134068f174cbe4a266a011bf719e15d0d#217274a134068f174cbe4a266a011bf719e15d0d"
 dependencies = [
+ "tokio",
+]
+
+[[package]]
+name = "roze-sqlx"
+version = "1.0.0"
+source = "git+https://github.com/roze-team/roze.git?rev=217274a134068f174cbe4a266a011bf719e15d0d#217274a134068f174cbe4a266a011bf719e15d0d"
+dependencies = [
+ "anyhow",
+ "serde",
+ "sqlx",
  "tokio",
 ]
 
