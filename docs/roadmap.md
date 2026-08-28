@@ -14,6 +14,7 @@
 | DTM HTTP/JSON-RPC 兼容 | 已支持核心 | 写入、查询、原子分支注册、force-stop 与 retry-reset；gRPC proto 已固化，服务端待补 |
 | XA | 部分支持 | 已有 Prepare/Commit/Rollback 与动态分支；资源管理器 SQL 助手和启发式结果待补 |
 | 二阶段消息 | 已支持核心 | Prepared/Dispatch/Abort，并复用 `roze-transaction` Outbox/Inbox 与 `roze-mq` |
+| Topic/KV | 已支持核心 | 通用版本化 KV、订阅增删查、HTTP 兼容端点与 `topic://` 消息分支展开 |
 | Workflow DSL | 已支持核心 | 静态依赖图、恢复和逆序补偿；回调式动态 Workflow 待补 |
 | Redis 存储 | 待实现 | 需要原子脚本、租约 fencing 和真实故障测试 |
 | SDK | 部分支持 | 已提供 Rust HTTP client；其他语言 SDK 和 gRPC client 待补 |

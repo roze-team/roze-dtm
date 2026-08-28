@@ -14,11 +14,18 @@
 | `POST /api/dtmsvr/registerBranch` | 注册 TCC/XA 二阶段分支 |
 | `POST /api/dtmsvr/registerTccBranch` | `registerBranch` 别名 |
 | `POST /api/dtmsvr/registerXaBranch` | `registerBranch` 别名 |
+| `POST /api/dtmsvr/prepareWorkflow` | 幂等创建 Prepared Workflow 并返回 transaction/progresses |
 | `POST /api/dtmsvr/forceStop` | 将非终态事务永久标记为 Failed |
 | `POST /api/dtmsvr/resetNextCronTime` | 让一个事务立即进入恢复调度 |
 | `GET /api/dtmsvr/resetCronTime` | 批量重置非终态事务的恢复时间 |
 | `GET /api/dtmsvr/query` | 查询全局事务与分支 |
 | `GET /api/dtmsvr/all` | 按 GID、类型、状态分页查询 |
+| `GET /api/dtmsvr/subscribe` | 创建 topic 或添加 URL 订阅者，使用版本化 CAS 更新 |
+| `GET /api/dtmsvr/unsubscribe` | 从 topic 删除 URL 订阅者 |
+| `DELETE /api/dtmsvr/topic/{topic_name}` | 删除 topic |
+| `GET /api/dtmsvr/scanKV` | 按分类分页扫描通用 KV |
+| `GET /api/dtmsvr/queryKV` | 按分类和 key 查询通用 KV |
+| `GET /api/metrics` | 上游路径兼容的 Prometheus 文本指标别名 |
 | `POST /api/json-rpc` | JSON-RPC 2.0：newGid、prepare、submit、abort、registerBranch |
 
 兼容响应保留 `dtm_result: SUCCESS/FAILURE`。启用 `control_token` 时，兼容端点和 `/v1/**` 一样要求 Bearer token。
@@ -36,8 +43,8 @@
 - Roze 不接受未列入 `allowed_branch_origins` 的分支 URL，也不跟随重定向。
 - 所有控制操作都有输入上限、统一审计和恢复租约。
 - `proto/dtmgimp.proto` 已固定与上游兼容的 gRPC service、message 和字段号；gRPC 服务端及客户端适配器仍在后续批次中，因此当前不能宣称 gRPC 可用。
-- topic/KV 订阅仍在后续兼容批次中。
-- JSON-RPC 始终返回 HTTP 200，并通过标准 `error.code` 表示协议或操作失败。
+- Message 分支支持 `topic://name`，提交时从持久化订阅快照展开为一个或多个 HTTP 分支；订阅变化不会改写已经提交的事务。
+- JSON-RPC 始终返回 HTTP 200，并通过标准 `error.code` 表示协议或操作失败；语法错误返回 `-32700`，无效请求返回 `-32600`。
 - `forceStop` 是不可自动恢复的管理操作，只应在确认人工介入后使用。
 - XA phase-2 URL 参数和资源管理器本地 SQL 助手尚需客户端侧适配验证。
 

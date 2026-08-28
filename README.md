@@ -59,7 +59,7 @@ docker compose up --build
 
 所有关系型后端会在启动时幂等创建事务、分支屏障和恢复租约表。连接由 Roze `roze-sqlx` 管理，可通过 `max_connections` 设置连接池上限。
 
-动态分支注册由存储层原子执行：内存后端使用写锁，PostgreSQL/MySQL 使用行锁，SQLite 使用带冲突重试的比较更新，避免多实例并发注册互相覆盖。
+动态分支注册由存储层原子执行：内存后端使用写锁，PostgreSQL/MySQL 使用行锁，SQLite 使用带冲突重试的比较更新，避免多实例并发注册互相覆盖。四种后端也提供版本化通用 KV 和 topic 订阅；Message 的 `topic://name` 分支会在提交时展开为订阅 URL 快照。
 
 ## Rust 客户端
 

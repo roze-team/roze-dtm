@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
-use crate::{BranchKind, Transaction, TransactionKind};
+use crate::{BranchKind, KvEntry, Transaction, TransactionKind};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateBranchRequest {
@@ -105,11 +105,84 @@ impl DtmHttpClient {
             .context("DTM newGid response did not contain gid")
     }
 
+    pub async fn subscribe_topic(
+        &self,
+        topic: &str,
+        url: &str,
+        remark: &str,
+    ) -> anyhow::Result<()> {
+        self.compat_topic_operation(
+            "/api/dtmsvr/subscribe",
+            &[("topic", topic), ("url", url), ("remark", remark)],
+        )
+        .await
+    }
+
+    pub async fn unsubscribe_topic(&self, topic: &str, url: &str) -> anyhow::Result<()> {
+        self.compat_topic_operation(
+            "/api/dtmsvr/unsubscribe",
+            &[("topic", topic), ("url", url)],
+        )
+        .await
+    }
+
+    pub async fn delete_topic(&self, topic: &str) -> anyhow::Result<()> {
+        let mut url = reqwest::Url::parse(&format!("{}/api/dtmsvr/topic/", self.base_url))?;
+        url.path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("DTM base URL cannot contain path segments"))?
+            .push(topic);
+        let response = self.authorized(self.client.delete(url)).send().await?;
+        decode_compat_success(response).await
+    }
+
+    pub async fn query_kv(
+        &self,
+        category: Option<&str>,
+        key: Option<&str>,
+    ) -> anyhow::Result<Vec<KvEntry>> {
+        let mut query = Vec::new();
+        if let Some(category) = category {
+            query.push(("cat", category));
+        }
+        if let Some(key) = key {
+            query.push(("key", key));
+        }
+        let response = self
+            .authorized(
+                self.client
+                    .get(format!("{}/api/dtmsvr/queryKV", self.base_url))
+                    .query(&query),
+            )
+            .send()
+            .await?;
+        let status = response.status();
+        let value: serde_json::Value = response.json().await?;
+        anyhow::ensure!(status.is_success(), "DTM KV query failed with status {status}");
+        serde_json::from_value(value.get("kv").cloned().context("KV response did not contain kv")?)
+            .map_err(Into::into)
+    }
+
     fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.bearer_token {
             Some(token) => request.bearer_auth(token),
             None => request,
         }
+    }
+
+    async fn compat_topic_operation(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> anyhow::Result<()> {
+        let response = self
+            .authorized(
+                self.client
+                    .get(format!("{}{}", self.base_url, path))
+                    .query(query),
+            )
+            .send()
+            .await?;
+        decode_compat_success(response).await
     }
 
     async fn post_transaction<T: Serialize + ?Sized>(
@@ -123,6 +196,17 @@ impl DtmHttpClient {
         }
         decode_transaction(request.send().await?).await
     }
+}
+
+async fn decode_compat_success(response: reqwest::Response) -> anyhow::Result<()> {
+    let status = response.status();
+    let value: serde_json::Value = response.json().await?;
+    anyhow::ensure!(status.is_success(), "DTM request failed with status {status}");
+    anyhow::ensure!(
+        value.get("dtm_result").and_then(serde_json::Value::as_str) == Some("SUCCESS"),
+        "DTM compatibility request failed"
+    );
+    Ok(())
 }
 
 async fn decode_transaction(response: reqwest::Response) -> anyhow::Result<Transaction> {

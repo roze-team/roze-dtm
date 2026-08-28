@@ -6,10 +6,18 @@ use std::{
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use sqlx::{mysql::MySqlPool, postgres::PgPool, Row, Sqlite, SqlitePool};
+use sqlx::{
+    mysql::{MySqlPool, MySqlRow},
+    postgres::{PgPool, PgRow},
+    sqlite::SqliteRow,
+    Row, Sqlite, SqlitePool,
+};
 use tokio::sync::RwLock;
 
 pub mod client;
+pub mod kv;
+
+pub use kv::{KvEntry, Topic, TopicSubscriber, TOPICS_CATEGORY};
 
 /// Reliable event delivery primitives used by DTM two-phase messages and outbox flows.
 ///
@@ -292,6 +300,17 @@ pub trait TransactionStore: Send + Sync + 'static {
     /// transaction so one writer cannot overwrite a branch added by another.
     async fn register_branch(&self, gid: &str, branch: Branch) -> anyhow::Result<Transaction>;
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>>;
+    async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>>;
+    async fn list_kv(
+        &self,
+        category: Option<&str>,
+        key: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KvEntry>>;
+    async fn create_kv(&self, entry: KvEntry) -> anyhow::Result<bool>;
+    async fn update_kv(&self, entry: KvEntry, expected_version: u64) -> anyhow::Result<bool>;
+    async fn delete_kv(&self, category: &str, key: &str) -> anyhow::Result<bool>;
     async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision>;
     async fn release_barrier(&self, barrier: &BranchBarrier) -> anyhow::Result<()>;
     async fn try_acquire_recovery_lease(
@@ -327,6 +346,32 @@ where
 
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>> {
         (**self).list_transactions().await
+    }
+
+    async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>> {
+        (**self).get_kv(category, key).await
+    }
+
+    async fn list_kv(
+        &self,
+        category: Option<&str>,
+        key: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KvEntry>> {
+        (**self).list_kv(category, key, offset, limit).await
+    }
+
+    async fn create_kv(&self, entry: KvEntry) -> anyhow::Result<bool> {
+        (**self).create_kv(entry).await
+    }
+
+    async fn update_kv(&self, entry: KvEntry, expected_version: u64) -> anyhow::Result<bool> {
+        (**self).update_kv(entry, expected_version).await
+    }
+
+    async fn delete_kv(&self, category: &str, key: &str) -> anyhow::Result<bool> {
+        (**self).delete_kv(category, key).await
     }
 
     async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision> {
@@ -479,6 +524,7 @@ fn parse_branch_url(value: &str) -> anyhow::Result<reqwest::Url> {
 #[derive(Debug, Clone, Default)]
 pub struct InMemoryTransactionStore {
     txs: Arc<RwLock<BTreeMap<String, Transaction>>>,
+    kv: Arc<RwLock<BTreeMap<(String, String), KvEntry>>>,
     barriers: Arc<RwLock<BTreeSet<String>>>,
     leases: Arc<RwLock<BTreeMap<String, RecoveryLease>>>,
 }
@@ -527,6 +573,69 @@ impl TransactionStore for InMemoryTransactionStore {
 
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>> {
         Ok(self.txs.read().await.values().cloned().collect())
+    }
+
+    async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>> {
+        Ok(self
+            .kv
+            .read()
+            .await
+            .get(&(category.to_owned(), key.to_owned()))
+            .cloned())
+    }
+
+    async fn list_kv(
+        &self,
+        category: Option<&str>,
+        key: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KvEntry>> {
+        Ok(self
+            .kv
+            .read()
+            .await
+            .values()
+            .filter(|entry| category.is_none_or(|category| entry.category == category))
+            .filter(|entry| key.is_none_or(|key| entry.key == key))
+            .skip(offset)
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    async fn create_kv(&self, entry: KvEntry) -> anyhow::Result<bool> {
+        let mut kv = self.kv.write().await;
+        let entry_key = (entry.category.clone(), entry.key.clone());
+        if kv.contains_key(&entry_key) {
+            return Ok(false);
+        }
+        kv.insert(entry_key, entry);
+        Ok(true)
+    }
+
+    async fn update_kv(&self, entry: KvEntry, expected_version: u64) -> anyhow::Result<bool> {
+        let mut kv = self.kv.write().await;
+        let entry_key = (entry.category.clone(), entry.key.clone());
+        let Some(existing) = kv.get(&entry_key) else {
+            return Ok(false);
+        };
+        if existing.version != expected_version
+            || entry.version != expected_version.saturating_add(1)
+        {
+            return Ok(false);
+        }
+        kv.insert(entry_key, entry);
+        Ok(true)
+    }
+
+    async fn delete_kv(&self, category: &str, key: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .kv
+            .write()
+            .await
+            .remove(&(category.to_owned(), key.to_owned()))
+            .is_some())
     }
 
     async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision> {
@@ -633,6 +742,21 @@ impl SqliteTransactionStore {
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS roze_dtm_kv (
+                category TEXT NOT NULL,
+                entry_key TEXT NOT NULL,
+                entry_value TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                created_at_millis INTEGER NOT NULL,
+                updated_at_millis INTEGER NOT NULL,
+                PRIMARY KEY (category, entry_key)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }
@@ -726,6 +850,91 @@ impl TransactionStore for SqliteTransactionStore {
         rows.into_iter()
             .map(|row| serde_json::from_str(row.get::<&str, _>("payload")).map_err(Into::into))
             .collect()
+    }
+
+    async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>> {
+        let row = sqlx::query(
+            "SELECT category, entry_key, entry_value, version, created_at_millis, \
+             updated_at_millis FROM roze_dtm_kv WHERE category = ? AND entry_key = ?",
+        )
+        .bind(category)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| sqlite_kv_entry(&row)).transpose()
+    }
+
+    async fn list_kv(
+        &self,
+        category: Option<&str>,
+        key: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KvEntry>> {
+        let rows = sqlx::query(
+            "SELECT category, entry_key, entry_value, version, created_at_millis, \
+             updated_at_millis FROM roze_dtm_kv \
+             WHERE (? IS NULL OR category = ?) AND (? IS NULL OR entry_key = ?) \
+             ORDER BY category, entry_key LIMIT ? OFFSET ?",
+        )
+        .bind(category)
+        .bind(category)
+        .bind(key)
+        .bind(key)
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(sqlite_kv_entry).collect()
+    }
+
+    async fn create_kv(&self, entry: KvEntry) -> anyhow::Result<bool> {
+        let changed = sqlx::query(
+            "INSERT OR IGNORE INTO roze_dtm_kv \
+             (category, entry_key, entry_value, version, created_at_millis, updated_at_millis) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(entry.category)
+        .bind(entry.key)
+        .bind(entry.value)
+        .bind(entry.version as i64)
+        .bind(entry.created_at_millis as i64)
+        .bind(entry.updated_at_millis as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(changed == 1)
+    }
+
+    async fn update_kv(&self, entry: KvEntry, expected_version: u64) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            entry.version == expected_version.saturating_add(1),
+            "invalid KV version transition"
+        );
+        let changed = sqlx::query(
+            "UPDATE roze_dtm_kv SET entry_value = ?, version = ?, updated_at_millis = ? \
+             WHERE category = ? AND entry_key = ? AND version = ?",
+        )
+        .bind(entry.value)
+        .bind(entry.version as i64)
+        .bind(entry.updated_at_millis as i64)
+        .bind(entry.category)
+        .bind(entry.key)
+        .bind(expected_version as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(changed == 1)
+    }
+
+    async fn delete_kv(&self, category: &str, key: &str) -> anyhow::Result<bool> {
+        Ok(sqlx::query("DELETE FROM roze_dtm_kv WHERE category = ? AND entry_key = ?")
+            .bind(category)
+            .bind(key)
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
+            == 1)
     }
 
     async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision> {
@@ -874,6 +1083,21 @@ impl PostgresTransactionStore {
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS roze_dtm_kv (
+                category VARCHAR(191) NOT NULL,
+                entry_key VARCHAR(191) NOT NULL,
+                entry_value TEXT NOT NULL,
+                version BIGINT NOT NULL,
+                created_at_millis BIGINT NOT NULL,
+                updated_at_millis BIGINT NOT NULL,
+                PRIMARY KEY (category, entry_key)
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }
@@ -962,6 +1186,90 @@ impl TransactionStore for PostgresTransactionStore {
         rows.into_iter()
             .map(|row| serde_json::from_str(row.get::<&str, _>("payload")).map_err(Into::into))
             .collect()
+    }
+
+    async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>> {
+        let row = sqlx::query(
+            "SELECT category, entry_key, entry_value, version, created_at_millis, \
+             updated_at_millis FROM roze_dtm_kv WHERE category = $1 AND entry_key = $2",
+        )
+        .bind(category)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| postgres_kv_entry(&row)).transpose()
+    }
+
+    async fn list_kv(
+        &self,
+        category: Option<&str>,
+        key: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KvEntry>> {
+        let rows = sqlx::query(
+            "SELECT category, entry_key, entry_value, version, created_at_millis, \
+             updated_at_millis FROM roze_dtm_kv \
+             WHERE ($1::text IS NULL OR category = $1) AND ($2::text IS NULL OR entry_key = $2) \
+             ORDER BY category, entry_key LIMIT $3 OFFSET $4",
+        )
+        .bind(category)
+        .bind(key)
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(postgres_kv_entry).collect()
+    }
+
+    async fn create_kv(&self, entry: KvEntry) -> anyhow::Result<bool> {
+        let changed = sqlx::query(
+            "INSERT INTO roze_dtm_kv \
+             (category, entry_key, entry_value, version, created_at_millis, updated_at_millis) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT(category, entry_key) DO NOTHING",
+        )
+        .bind(entry.category)
+        .bind(entry.key)
+        .bind(entry.value)
+        .bind(entry.version as i64)
+        .bind(entry.created_at_millis as i64)
+        .bind(entry.updated_at_millis as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(changed == 1)
+    }
+
+    async fn update_kv(&self, entry: KvEntry, expected_version: u64) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            entry.version == expected_version.saturating_add(1),
+            "invalid KV version transition"
+        );
+        let changed = sqlx::query(
+            "UPDATE roze_dtm_kv SET entry_value = $1, version = $2, updated_at_millis = $3 \
+             WHERE category = $4 AND entry_key = $5 AND version = $6",
+        )
+        .bind(entry.value)
+        .bind(entry.version as i64)
+        .bind(entry.updated_at_millis as i64)
+        .bind(entry.category)
+        .bind(entry.key)
+        .bind(expected_version as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(changed == 1)
+    }
+
+    async fn delete_kv(&self, category: &str, key: &str) -> anyhow::Result<bool> {
+        Ok(sqlx::query("DELETE FROM roze_dtm_kv WHERE category = $1 AND entry_key = $2")
+            .bind(category)
+            .bind(key)
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
+            == 1)
     }
 
     async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision> {
@@ -1123,6 +1431,21 @@ impl MySqlTransactionStore {
         )
         .execute(&self.pool)
         .await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS roze_dtm_kv (
+                category VARCHAR(191) NOT NULL,
+                entry_key VARCHAR(191) NOT NULL,
+                entry_value LONGTEXT NOT NULL,
+                version BIGINT NOT NULL,
+                created_at_millis BIGINT NOT NULL,
+                updated_at_millis BIGINT NOT NULL,
+                PRIMARY KEY (category, entry_key)
+            ) ENGINE=InnoDB
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }
@@ -1210,6 +1533,91 @@ impl TransactionStore for MySqlTransactionStore {
         rows.into_iter()
             .map(|row| serde_json::from_str(row.get::<&str, _>("payload")).map_err(Into::into))
             .collect()
+    }
+
+    async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>> {
+        let row = sqlx::query(
+            "SELECT category, entry_key, entry_value, version, created_at_millis, \
+             updated_at_millis FROM roze_dtm_kv WHERE category = ? AND entry_key = ?",
+        )
+        .bind(category)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| mysql_kv_entry(&row)).transpose()
+    }
+
+    async fn list_kv(
+        &self,
+        category: Option<&str>,
+        key: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> anyhow::Result<Vec<KvEntry>> {
+        let rows = sqlx::query(
+            "SELECT category, entry_key, entry_value, version, created_at_millis, \
+             updated_at_millis FROM roze_dtm_kv \
+             WHERE (? IS NULL OR category = ?) AND (? IS NULL OR entry_key = ?) \
+             ORDER BY category, entry_key LIMIT ? OFFSET ?",
+        )
+        .bind(category)
+        .bind(category)
+        .bind(key)
+        .bind(key)
+        .bind(limit as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(mysql_kv_entry).collect()
+    }
+
+    async fn create_kv(&self, entry: KvEntry) -> anyhow::Result<bool> {
+        let changed = sqlx::query(
+            "INSERT IGNORE INTO roze_dtm_kv \
+             (category, entry_key, entry_value, version, created_at_millis, updated_at_millis) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(entry.category)
+        .bind(entry.key)
+        .bind(entry.value)
+        .bind(entry.version as i64)
+        .bind(entry.created_at_millis as i64)
+        .bind(entry.updated_at_millis as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(changed == 1)
+    }
+
+    async fn update_kv(&self, entry: KvEntry, expected_version: u64) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            entry.version == expected_version.saturating_add(1),
+            "invalid KV version transition"
+        );
+        let changed = sqlx::query(
+            "UPDATE roze_dtm_kv SET entry_value = ?, version = ?, updated_at_millis = ? \
+             WHERE category = ? AND entry_key = ? AND version = ?",
+        )
+        .bind(entry.value)
+        .bind(entry.version as i64)
+        .bind(entry.updated_at_millis as i64)
+        .bind(entry.category)
+        .bind(entry.key)
+        .bind(expected_version as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(changed == 1)
+    }
+
+    async fn delete_kv(&self, category: &str, key: &str) -> anyhow::Result<bool> {
+        Ok(sqlx::query("DELETE FROM roze_dtm_kv WHERE category = ? AND entry_key = ?")
+            .bind(category)
+            .bind(key)
+            .execute(&self.pool)
+            .await?
+            .rows_affected()
+            == 1)
     }
 
     async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision> {
@@ -1361,12 +1769,72 @@ where
         &self.store
     }
 
+    pub async fn subscribe_topic(
+        &self,
+        topic: &str,
+        url: &str,
+        remark: &str,
+    ) -> anyhow::Result<Topic> {
+        kv::subscribe(&self.store, topic, url, remark).await
+    }
+
+    pub async fn unsubscribe_topic(&self, topic: &str, url: &str) -> anyhow::Result<Topic> {
+        kv::unsubscribe(&self.store, topic, url).await
+    }
+
+    pub async fn get_topic(&self, topic: &str) -> anyhow::Result<Option<Topic>> {
+        kv::get_topic(&self.store, topic).await
+    }
+
+    pub async fn delete_topic(&self, topic: &str) -> anyhow::Result<bool> {
+        kv::delete_topic(&self.store, topic).await
+    }
+
     pub async fn submit(&self, tx: Transaction) -> anyhow::Result<Transaction> {
         let mut tx = tx;
+        if tx.kind == TransactionKind::Message {
+            self.expand_message_topics(&mut tx).await?;
+        }
         tx.timeout_millis
             .get_or_insert(self.options.transaction_timeout_millis);
         self.store.insert_transaction(tx.clone()).await?;
         Ok(tx)
+    }
+
+    async fn expand_message_topics(&self, tx: &mut Transaction) -> anyhow::Result<()> {
+        let mut expanded = Vec::new();
+        for branch in std::mem::take(&mut tx.branches) {
+            let Some(topic_name) = branch.action.strip_prefix("topic://") else {
+                expanded.push(branch);
+                continue;
+            };
+            let topic = self
+                .get_topic(topic_name)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("topic not found: {topic_name}"))?;
+            anyhow::ensure!(
+                !topic.subscribers.is_empty(),
+                "topic has no subscribers: {topic_name}"
+            );
+            let subscriber_count = topic.subscribers.len();
+            for (index, subscriber) in topic.subscribers.into_iter().enumerate() {
+                let mut resolved = branch.clone();
+                if subscriber_count > 1 {
+                    resolved.id = format!("{}-{:02}", resolved.id, index + 1);
+                }
+                resolved.action = subscriber.url;
+                expanded.push(resolved);
+            }
+        }
+        let mut branch_ids = BTreeSet::new();
+        anyhow::ensure!(
+            expanded
+                .iter()
+                .all(|branch| branch_ids.insert(branch.id.clone())),
+            "message topic expansion produced duplicate branch ids"
+        );
+        tx.branches = expanded;
+        Ok(())
     }
 
     pub async fn submit_default_tcc(
@@ -1671,6 +2139,19 @@ where
         Ok(tx)
     }
 
+    pub async fn prepare_workflow(&self, gid: &str) -> anyhow::Result<Transaction> {
+        let mut tx = self
+            .transaction_of_kind(gid, TransactionKind::Workflow)
+            .await?;
+        if tx.status == TransactionStatus::Prepared {
+            return Ok(tx);
+        }
+        ensure_status(&tx, &[TransactionStatus::Submitted])?;
+        tx.status = TransactionStatus::Prepared;
+        self.store.update_transaction(tx.clone()).await?;
+        Ok(tx)
+    }
+
     pub async fn start_workflow(&self, gid: &str) -> anyhow::Result<Transaction> {
         let mut tx = self
             .transaction_of_kind(gid, TransactionKind::Workflow)
@@ -1680,7 +2161,11 @@ where
         }
         ensure_status(
             &tx,
-            &[TransactionStatus::Submitted, TransactionStatus::Succeeding],
+            &[
+                TransactionStatus::Submitted,
+                TransactionStatus::Prepared,
+                TransactionStatus::Succeeding,
+            ],
         )?;
         tx.status = TransactionStatus::Succeeding;
         loop {
@@ -1749,6 +2234,7 @@ where
             &tx,
             &[
                 TransactionStatus::Submitted,
+                TransactionStatus::Prepared,
                 TransactionStatus::Succeeding,
                 TransactionStatus::Aborting,
             ],
@@ -2211,6 +2697,57 @@ fn ensure_status(tx: &Transaction, allowed: &[TransactionStatus]) -> anyhow::Res
         tx.status
     );
     Ok(())
+}
+
+fn sqlite_kv_entry(row: &SqliteRow) -> anyhow::Result<KvEntry> {
+    kv_entry_from_values(
+        row.get("category"),
+        row.get("entry_key"),
+        row.get("entry_value"),
+        row.get("version"),
+        row.get("created_at_millis"),
+        row.get("updated_at_millis"),
+    )
+}
+
+fn postgres_kv_entry(row: &PgRow) -> anyhow::Result<KvEntry> {
+    kv_entry_from_values(
+        row.get("category"),
+        row.get("entry_key"),
+        row.get("entry_value"),
+        row.get("version"),
+        row.get("created_at_millis"),
+        row.get("updated_at_millis"),
+    )
+}
+
+fn mysql_kv_entry(row: &MySqlRow) -> anyhow::Result<KvEntry> {
+    kv_entry_from_values(
+        row.get("category"),
+        row.get("entry_key"),
+        row.get("entry_value"),
+        row.get("version"),
+        row.get("created_at_millis"),
+        row.get("updated_at_millis"),
+    )
+}
+
+fn kv_entry_from_values(
+    category: String,
+    key: String,
+    value: String,
+    version: i64,
+    created_at_millis: i64,
+    updated_at_millis: i64,
+) -> anyhow::Result<KvEntry> {
+    Ok(KvEntry {
+        category,
+        key,
+        value,
+        version: version.try_into()?,
+        created_at_millis: created_at_millis.try_into()?,
+        updated_at_millis: updated_at_millis.try_into()?,
+    })
 }
 
 fn current_millis() -> u64 {
@@ -2872,6 +3409,94 @@ mod tests {
                 .status,
             TransactionStatus::Succeeded
         );
+    }
+
+    #[tokio::test]
+    async fn topic_subscriptions_expand_message_branches() {
+        let dtm = Dtm::new(InMemoryTransactionStore::new());
+        dtm.subscribe_topic("orders", "http://billing/orders", "billing")
+            .await
+            .expect("subscribe billing");
+        dtm.subscribe_topic("orders", "http://warehouse/orders", "warehouse")
+            .await
+            .expect("subscribe warehouse");
+
+        let transaction = dtm
+            .submit(Transaction::message(
+                "gid-topic-message",
+                vec![Branch::message(
+                    "publish",
+                    "topic://orders",
+                    serde_json::json!({"order_id": "42"}),
+                )],
+            ))
+            .await
+            .expect("submit topic message");
+
+        assert_eq!(transaction.branches.len(), 2);
+        assert_eq!(transaction.branches[0].id, "publish-01");
+        assert_eq!(transaction.branches[0].action, "http://billing/orders");
+        assert_eq!(transaction.branches[1].id, "publish-02");
+        assert_eq!(
+            transaction.branches[1].action,
+            "http://warehouse/orders"
+        );
+    }
+
+    #[tokio::test]
+    async fn topic_subscription_updates_are_versioned() {
+        let dtm = Dtm::new(InMemoryTransactionStore::new());
+        let first = dtm
+            .subscribe_topic("events", "http://one/events", "one")
+            .await
+            .expect("first subscription");
+        assert_eq!(first.version, 1);
+        let second = dtm
+            .subscribe_topic("events", "http://two/events", "two")
+            .await
+            .expect("second subscription");
+        assert_eq!(second.version, 2);
+        assert!(dtm
+            .subscribe_topic("events", "http://two/events", "duplicate")
+            .await
+            .is_err());
+        let remaining = dtm
+            .unsubscribe_topic("events", "http://one/events")
+            .await
+            .expect("unsubscribe");
+        assert_eq!(remaining.version, 3);
+        assert_eq!(remaining.subscribers.len(), 1);
+        assert!(dtm.delete_topic("events").await.expect("delete topic"));
+        assert!(dtm.get_topic("events").await.expect("read topic").is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_topic_subscriptions_do_not_lose_updates() {
+        let dtm = Dtm::new(InMemoryTransactionStore::new());
+        let mut tasks = Vec::new();
+        for index in 0..32 {
+            let dtm = dtm.clone();
+            tasks.push(tokio::spawn(async move {
+                dtm.subscribe_topic(
+                    "fanout",
+                    &format!("http://subscriber-{index}/events"),
+                    &format!("subscriber {index}"),
+                )
+                .await
+                .expect("subscribe");
+            }));
+        }
+        for task in tasks {
+            task.await.expect("join");
+        }
+
+        let topic = dtm
+            .get_topic("fanout")
+            .await
+            .expect("read topic")
+            .expect("topic exists");
+        assert_eq!(topic.version, 32);
+        assert_eq!(topic.subscribers.len(), 32);
     }
 
     #[tokio::test]

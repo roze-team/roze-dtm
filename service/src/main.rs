@@ -16,7 +16,7 @@ use roze_dtm::{
 };
 use roze_http::{
     rest::{self, HttpResponse, RestServer, RestService},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Path, Query, Router, State,
 };
 use roze_service::{LifecycleState, ServiceGroup};
@@ -297,6 +297,28 @@ struct CompatQuery {
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
+struct TopicQuery {
+    topic: String,
+    url: String,
+    remark: String,
+}
+
+#[derive(Deserialize)]
+struct TopicPath {
+    topic_name: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct KvQuery {
+    cat: Option<String>,
+    key: Option<String>,
+    position: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
 struct CompatTransactionRequest {
     gid: String,
     trans_type: String,
@@ -526,9 +548,16 @@ fn control_router(state: ControlState) -> Router {
         .route("/api/dtmsvr/registerBranch", post(compat_register_branch))
         .route("/api/dtmsvr/registerTccBranch", post(compat_register_branch))
         .route("/api/dtmsvr/registerXaBranch", post(compat_register_branch))
+        .route("/api/dtmsvr/prepareWorkflow", post(compat_prepare_workflow))
         .route("/api/dtmsvr/forceStop", post(compat_force_stop))
         .route("/api/dtmsvr/resetNextCronTime", post(compat_reset_retry))
         .route("/api/dtmsvr/resetCronTime", get(compat_reset_retry_batch))
+        .route("/api/dtmsvr/subscribe", get(compat_subscribe))
+        .route("/api/dtmsvr/unsubscribe", get(compat_unsubscribe))
+        .route("/api/dtmsvr/topic/{topic_name}", delete(compat_delete_topic))
+        .route("/api/dtmsvr/scanKV", get(compat_scan_kv))
+        .route("/api/dtmsvr/queryKV", get(compat_query_kv))
+        .route("/api/metrics", get(metrics))
         .route("/api/json-rpc", post(json_rpc))
         .with_state(state)
 }
@@ -687,12 +716,143 @@ async fn compat_reset_retry_batch(
     }
 }
 
+async fn compat_subscribe(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Query(query): Query<TopicQuery>,
+) -> HttpResponse {
+    if !authorize(&state, &headers) {
+        return unauthorized_response();
+    }
+    if state.branch_url_policy.validate(&query.url).is_err() {
+        return compat_failure("subscriber URL is not allowed");
+    }
+    match state
+        .dtm
+        .subscribe_topic(&query.topic, &query.url, &query.remark)
+        .await
+    {
+        Ok(_) => compat_response(serde_json::json!({"dtm_result": "SUCCESS"})),
+        Err(_) => compat_failure("topic subscription failed"),
+    }
+}
+
+async fn compat_unsubscribe(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Query(query): Query<TopicQuery>,
+) -> HttpResponse {
+    if !authorize(&state, &headers) {
+        return unauthorized_response();
+    }
+    match state.dtm.unsubscribe_topic(&query.topic, &query.url).await {
+        Ok(_) => compat_response(serde_json::json!({"dtm_result": "SUCCESS"})),
+        Err(_) => compat_failure("topic unsubscription failed"),
+    }
+}
+
+async fn compat_delete_topic(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Path(path): Path<TopicPath>,
+) -> HttpResponse {
+    if !authorize(&state, &headers) {
+        return unauthorized_response();
+    }
+    match state.dtm.delete_topic(&path.topic_name).await {
+        Ok(true) => compat_response(serde_json::json!({"dtm_result": "SUCCESS"})),
+        Ok(false) => compat_failure("topic not found"),
+        Err(_) => compat_failure("topic deletion failed"),
+    }
+}
+
+async fn compat_scan_kv(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Query(query): Query<KvQuery>,
+) -> HttpResponse {
+    if !authorize(&state, &headers) {
+        return unauthorized_response();
+    }
+    let limit = query.limit.unwrap_or(100).clamp(1, 200);
+    let position = match query.position.as_deref().unwrap_or_default() {
+        "" => 0,
+        value => match value.parse::<usize>() {
+            Ok(value) if value <= 1_000_000 => value,
+            _ => return compat_failure("invalid KV position"),
+        },
+    };
+    match state
+        .dtm
+        .store()
+        .list_kv(
+            query.cat.as_deref().filter(|value| !value.is_empty()),
+            None,
+            position,
+            limit,
+        )
+        .await
+    {
+        Ok(entries) => compat_response(serde_json::json!({
+            "next_position": if entries.len() == limit { (position + limit).to_string() } else { String::new() },
+            "kv": entries,
+            "dtm_result": "SUCCESS"
+        })),
+        Err(_) => compat_failure("KV scan failed"),
+    }
+}
+
+async fn compat_query_kv(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Query(query): Query<KvQuery>,
+) -> HttpResponse {
+    if !authorize(&state, &headers) {
+        return unauthorized_response();
+    }
+    match state
+        .dtm
+        .store()
+        .list_kv(
+            query.cat.as_deref().filter(|value| !value.is_empty()),
+            query.key.as_deref().filter(|value| !value.is_empty()),
+            0,
+            200,
+        )
+        .await
+    {
+        Ok(entries) => compat_response(
+            serde_json::json!({"kv": entries, "dtm_result": "SUCCESS"}),
+        ),
+        Err(_) => compat_failure("KV query failed"),
+    }
+}
+
 async fn compat_prepare(
     State(state): State<ControlState>,
     headers: HeaderMap,
     Json(request): Json<CompatTransactionRequest>,
 ) -> HttpResponse {
     compat_write(&state, &headers, request, CompatOperation::Prepare).await
+}
+
+async fn compat_prepare_workflow(
+    State(state): State<ControlState>,
+    headers: HeaderMap,
+    Json(mut request): Json<CompatTransactionRequest>,
+) -> HttpResponse {
+    if !authorize(&state, &headers) {
+        return unauthorized_response();
+    }
+    request.trans_type = "workflow".to_owned();
+    match compat_apply(&state, request, CompatOperation::Prepare).await {
+        Ok(transaction) => compat_response(serde_json::json!({
+            "transaction": &transaction,
+            "progresses": &transaction.branches,
+            "dtm_result": "SUCCESS"
+        })),
+        Err(_) => compat_failure("workflow preparation failed"),
+    }
 }
 
 async fn compat_submit(
@@ -771,6 +931,9 @@ async fn compat_apply(
         (TransactionKind::Saga, CompatOperation::Abort) => state.dtm.abort_saga(&gid).await,
         (TransactionKind::Workflow, CompatOperation::Submit) => state.dtm.start_workflow(&gid).await,
         (TransactionKind::Workflow, CompatOperation::Abort) => state.dtm.abort_workflow(&gid).await,
+        (TransactionKind::Workflow, CompatOperation::Prepare) => {
+            state.dtm.prepare_workflow(&gid).await
+        }
         (_, CompatOperation::Prepare) => state
             .dtm
             .store()
@@ -836,8 +999,20 @@ fn compat_branch_from_request(
 async fn json_rpc(
     State(state): State<ControlState>,
     headers: HeaderMap,
-    Json(request): Json<JsonRpcRequest>,
+    body: String,
 ) -> HttpResponse {
+    let value: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(value) => value,
+        Err(_) => return json_rpc_error(serde_json::Value::Null, -32700, "parse error"),
+    };
+    let id = value
+        .get("id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let request: JsonRpcRequest = match serde_json::from_value(value) {
+        Ok(request) => request,
+        Err(_) => return json_rpc_error(id, -32600, "invalid request"),
+    };
     let id = request.id.clone();
     if !authorize(&state, &headers) {
         return json_rpc_error(id, -32001, "unauthorized");
@@ -918,7 +1093,9 @@ fn compat_transaction(
             payload => payload,
         };
         let action = step.get("action").context("step action is required")?;
-        policy.validate(action)?;
+        if kind != TransactionKind::Message || !action.starts_with("topic://") {
+            policy.validate(action)?;
+        }
         let branch = match kind {
             TransactionKind::Saga => {
                 let compensate = step.get("compensate").context("step compensate is required")?;
@@ -1195,10 +1372,13 @@ fn build_transaction(
     let mut ids = std::collections::BTreeSet::new();
     let mut branches = Vec::with_capacity(request.branches.len());
     for branch in request.branches {
+        let action_is_topic = kind == TransactionKind::Message
+            && branch.action.starts_with("topic://")
+            && branch.action.len() > "topic://".len();
         if branch.id.trim().is_empty()
             || branch.id.len() > 128
             || !ids.insert(branch.id.clone())
-            || branch_url_policy.validate(&branch.action).is_err()
+            || (!action_is_topic && branch_url_policy.validate(&branch.action).is_err())
         {
             return Err("branch id or action URL is invalid");
         }
@@ -1596,6 +1776,24 @@ mod tests {
             metadata: BTreeMap::new(),
         };
         assert!(build_transaction(TransactionKind::Tcc, request, &policy).is_err());
+
+        let topic_message = SubmitTransactionRequest {
+            gid: "order-events".to_string(),
+            kind: Some(TransactionKind::Message),
+            branches: vec![BranchRequest {
+                id: "publish".to_string(),
+                kind: Some(BranchKind::MessageAction),
+                action: "topic://orders".to_string(),
+                compensate: None,
+                confirm: None,
+                cancel: None,
+                payload: serde_json::json!({"order_id": "order-events"}),
+                dependencies: Vec::new(),
+            }],
+            timeout_millis: None,
+            metadata: BTreeMap::new(),
+        };
+        assert!(build_transaction(TransactionKind::Message, topic_message, &policy).is_ok());
     }
 
     #[test]
