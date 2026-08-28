@@ -69,6 +69,12 @@ jobs:
             sleep 2
           done
           exit 1
+      - name: Grant MySQL XA recovery privilege
+        run: |
+          container_id="$(docker ps --filter ancestor=mysql:8.4 --format '{{.ID}}')"
+          test -n "$container_id"
+          docker exec "$container_id" mysql -uroot -proot-test \
+            -e "GRANT XA_RECOVER_ADMIN ON *.* TO 'roze'@'%';"
       - name: Start Redis Cluster
         run: |
           for port in 7000 7001 7002; do

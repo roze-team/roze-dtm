@@ -88,7 +88,7 @@ ROZE_TEST_REDIS_CLUSTER_URLS=redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis
 cargo test redis_cluster_store_round_trip_against_real_service -- --ignored --nocapture
 ```
 
-CI 会启动 PostgreSQL、MySQL、Redis standalone 和三节点 Redis Cluster，启用 PostgreSQL prepared transactions，并强制执行关系型存储、真实 XA Commit/Rollback/屏障/对账及两种 Redis 集成测试。
+CI 会启动 PostgreSQL、MySQL、Redis standalone 和三节点 Redis Cluster，启用 PostgreSQL prepared transactions、为受限 MySQL 测试用户授予 `XA_RECOVER_ADMIN`，并强制执行关系型存储、真实 XA Commit/Rollback/屏障/对账及两种 Redis 集成测试。生产 MySQL 的 DTM 资源管理账户同样需要该动态权限才能跨连接执行 prepared XID 对账，但不需要 root 或其他全局写权限。
 
 ## 运行
 
