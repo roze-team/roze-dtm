@@ -1,0 +1,30 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - redis-data:/data
+
+  dtm:
+    build: .
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      ROZE_CONFIG_PATH: /app/config.redis.yaml
+      ROZE_DTM_CONTROL_TOKEN: local-control-token-change-me-00000000
+      ROZE_DTM_WORKER_ID: roze-dtm-redis-compose-1
+      ROZE_DTM_REDIS_URL: redis://redis:6379
+    volumes:
+      - ./service/config.redis.production.yaml:/app/config.redis.yaml:ro
+    ports:
+      - "8090:8090"
+      - "36790:36790"
+
+volumes:
+  redis-data:

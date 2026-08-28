@@ -13,10 +13,11 @@ use anyhow::Context as _;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use roze_dtm::{
-    Branch, BranchKind, BranchStatus, BranchUrlPolicy, Dtm, DtmOptions, HttpBranchInvoker,
-    InMemoryTransactionStore, MySqlTransactionStore, PostgresTransactionStore,
-    SqliteTransactionStore, Transaction, TransactionKind, TransactionOptions, TransactionStatus,
-    TransactionStore, WorkflowProgress, WorkflowProgressStatus,
+    validate_redis_namespace, Branch, BranchKind, BranchStatus, BranchUrlPolicy, Dtm, DtmOptions,
+    HttpBranchInvoker, InMemoryTransactionStore, MySqlTransactionStore,
+    PostgresTransactionStore, RedisTransactionStore, SqliteTransactionStore, Transaction,
+    TransactionKind, TransactionOptions, TransactionStatus, TransactionStore, WorkflowProgress,
+    WorkflowProgressStatus,
 };
 use roze_http::{
     rest::{self, HttpResponse, RestServer, RestService},
@@ -143,6 +144,7 @@ impl DtmConfig {
                 .store
                 .validate_url("postgres", &["postgres://", "postgresql://"])?,
             StoreKind::Mysql => self.store.validate_url("mysql", &["mysql://"])?,
+            StoreKind::Redis => self.store.validate_redis()?,
         }
         Ok(())
     }
@@ -165,6 +167,14 @@ struct StoreConfig {
     kind: StoreKind,
     #[serde(default)]
     database_url: Option<String>,
+    #[serde(default)]
+    redis_url: Option<String>,
+    #[serde(default)]
+    redis_cluster_urls: Vec<String>,
+    #[serde(default = "default_redis_namespace")]
+    redis_namespace: String,
+    #[serde(default = "default_redis_operation_timeout_ms")]
+    redis_operation_timeout_ms: u64,
     #[serde(default = "default_store_max_connections")]
     max_connections: u32,
 }
@@ -174,6 +184,10 @@ impl Default for StoreConfig {
         Self {
             kind: StoreKind::Memory,
             database_url: None,
+            redis_url: None,
+            redis_cluster_urls: Vec::new(),
+            redis_namespace: default_redis_namespace(),
+            redis_operation_timeout_ms: default_redis_operation_timeout_ms(),
             max_connections: default_store_max_connections(),
         }
     }
@@ -198,6 +212,37 @@ impl StoreConfig {
         );
         Ok(())
     }
+
+    fn validate_redis(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.database_url.is_none(),
+            "application.dtm.store.database_url is not used by the Redis store"
+        );
+        let standalone = self
+            .redis_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty());
+        anyhow::ensure!(
+            standalone.is_some() || !self.redis_cluster_urls.is_empty(),
+            "application.dtm.store.redis_url or redis_cluster_urls is required for Redis"
+        );
+        for url in standalone
+            .into_iter()
+            .chain(self.redis_cluster_urls.iter().map(String::as_str))
+        {
+            anyhow::ensure!(
+                url.starts_with("redis://") || url.starts_with("rediss://"),
+                "application.dtm.store Redis URL must use redis:// or rediss://"
+            );
+        }
+        validate_redis_namespace(&self.redis_namespace)
+            .context("application.dtm.store.redis_namespace is invalid")?;
+        anyhow::ensure!(
+            (1..=120_000).contains(&self.redis_operation_timeout_ms),
+            "application.dtm.store.redis_operation_timeout_ms must be between 1 and 120000"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -208,6 +253,7 @@ enum StoreKind {
     Sqlite,
     Postgres,
     Mysql,
+    Redis,
 }
 
 type DtmRuntime = Dtm<Arc<dyn TransactionStore>, HttpBranchInvoker>;
@@ -436,6 +482,17 @@ async fn main() -> anyhow::Result<()> {
             .await?;
             let store = MySqlTransactionStore::from_pool(pool);
             store.migrate().await?;
+            Arc::new(store)
+        }
+        StoreKind::Redis => {
+            let store_config = &config.application.dtm.store;
+            let store = RedisTransactionStore::open_topology_with_timeout(
+                store_config.redis_url.as_deref().unwrap_or_default(),
+                &store_config.redis_cluster_urls,
+                &store_config.redis_namespace,
+                Duration::from_millis(store_config.redis_operation_timeout_ms),
+            )?;
+            store.health_check().await?;
             Arc::new(store)
         }
     };
@@ -1975,6 +2032,14 @@ fn default_worker_id() -> String {
     "roze-dtm-local".to_string()
 }
 
+fn default_redis_namespace() -> String {
+    "roze-dtm".to_owned()
+}
+
+const fn default_redis_operation_timeout_ms() -> u64 {
+    5_000
+}
+
 const fn default_store_max_connections() -> u32 {
     10
 }
@@ -2029,6 +2094,33 @@ mod tests {
 
         config.store.database_url = Some("mysql://dtm:secret@db/roze_dtm".to_string());
         config.store.max_connections = 0;
+        assert!(config.validate(false).is_err());
+    }
+
+    #[test]
+    fn redis_store_requires_valid_topology_and_namespace() {
+        let mut config = DtmConfig {
+            allowed_branch_origins: vec!["http://inventory".to_owned()],
+            ..DtmConfig::default()
+        };
+        config.store.kind = StoreKind::Redis;
+        assert!(config.validate(false).is_err());
+
+        config.store.redis_url = Some("redis://redis:6379".to_owned());
+        config.validate(false).expect("valid standalone Redis");
+
+        config.store.redis_url = None;
+        config.store.redis_cluster_urls = vec![
+            "rediss://redis-0:6379".to_owned(),
+            "rediss://redis-1:6379".to_owned(),
+        ];
+        config.validate(false).expect("valid Redis Cluster");
+
+        config.store.redis_namespace = "unsafe{slot}".to_owned();
+        assert!(config.validate(false).is_err());
+
+        config.store.redis_namespace = "safe-slot".to_owned();
+        config.store.redis_operation_timeout_ms = 0;
         assert!(config.validate(false).is_err());
     }
 

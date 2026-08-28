@@ -20,8 +20,12 @@ pub mod client;
 pub mod grpc_client;
 pub mod kv;
 pub mod pb;
+pub mod redis_store;
 
 pub use kv::{KvEntry, Topic, TopicSubscriber, TOPICS_CATEGORY};
+pub use redis_store::{
+    validate_redis_namespace, RedisTransactionStore, DEFAULT_REDIS_OPERATION_TIMEOUT,
+};
 
 /// Reliable event delivery primitives used by DTM two-phase messages and outbox flows.
 ///

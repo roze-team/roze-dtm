@@ -4,7 +4,7 @@ Roze 的独立分布式事务协调器，默认提供 TCC，并支持 Saga 工�
 
 ## 项目结构
 
-- `src/lib.rs`：DTM 核心库，包含 TCC/Saga 状态机、内存、SQLite、PostgreSQL、MySQL 存储、HTTP 分支调用和恢复逻辑。
+- `src/lib.rs`：DTM 核心库，包含 TCC/Saga 状态机、内存、SQLite、PostgreSQL、MySQL、Redis 存储、HTTP 分支调用和恢复逻辑。
 - `service/`：独立控制面服务。
 - `proto/dtmgimp.proto`：与 dtm-labs/dtm 保持字段号兼容的 gRPC 协议合同和生成边界。
 - `docs/dtm-grpc.md`：Roze gRPC 生命周期、鉴权、健康检查和客户端契约。
@@ -12,6 +12,7 @@ Roze 的独立分布式事务协调器，默认提供 TCC，并支持 Saga 工�
 - `docs/dtm.md`：API、部署与安全契约。
 - `docs/roadmap.md`：参考 dtm-labs/dtm 的能力矩阵与 Roze 实施顺序。
 - `docs/dtm-compatibility.md`：dtm-labs/dtm HTTP 兼容端点、调用顺序和差异。
+- `docs/production-validation.md`：真实依赖、互操作、故障注入和生产证据状态。
 
 ## 验证
 
@@ -25,6 +26,20 @@ cargo test --workspace
 ROZE_DTM_TEST_POSTGRES_URL=postgres://user:password@localhost/roze_dtm
 ROZE_DTM_TEST_MYSQL_URL=mysql://user:password@localhost/roze_dtm
 cargo test --workspace
+```
+
+Redis 后端的真实依赖测试默认忽略；可通过 standalone Redis 显式运行：
+
+```bash
+ROZE_TEST_REDIS_URL=redis://127.0.0.1:6379 \
+cargo test redis_store_round_trip_against_real_service -- --ignored --nocapture
+```
+
+Redis Cluster 使用逗号分隔的种子节点执行对应 ignored test：
+
+```bash
+ROZE_TEST_REDIS_CLUSTER_URLS=redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002 \
+cargo test redis_cluster_store_round_trip_against_real_service -- --ignored --nocapture
 ```
 
 CI 会启动 PostgreSQL 和 MySQL，并强制执行这两组测试。
@@ -47,6 +62,12 @@ cargo run -p roze-dtm-service
 docker compose up --build
 ```
 
+Redis standalone 拓扑示例使用独立 Compose 文件：
+
+```bash
+docker compose -f compose.redis.yaml up --build
+```
+
 服务默认监听 HTTP `http://127.0.0.1:8090` 和 gRPC `127.0.0.1:36790`。Compose 中的令牌和数据库密码仅用于本地演示，部署前必须替换。生产配置模板位于 `service/config.production.yaml`。
 
 ## 存储后端
@@ -57,10 +78,11 @@ docker compose up --build
 - `sqlite`：单实例持久化。
 - `postgres`：推荐的生产后端，支持多实例恢复租约。
 - `mysql`：生产后端，支持多实例恢复租约。
+- `redis`：复用 Roze standalone/Cluster 客户端，提供 Lua CAS、原子屏障、版本化 KV 和基于 Redis 服务端时间的恢复租约。
 
-所有关系型后端会在启动时幂等创建事务、分支屏障和恢复租约表。连接由 Roze `roze-sqlx` 管理，可通过 `max_connections` 设置连接池上限。
+所有关系型后端会在启动时幂等创建事务、分支屏障和恢复租约表。连接由 Roze `roze-sqlx` 管理，可通过 `max_connections` 设置连接池上限。Redis 配置使用 `redis_url` 或 `redis_cluster_urls`，并要求安全的 `redis_namespace`；`redis_operation_timeout_ms`（默认 5000）同时限制建连和每次命令。所有数据 key 共享显式 Cluster hash tag，但事务、KV、屏障和租约脚本每次只访问一个 key。
 
-动态分支注册由存储层原子执行：内存后端使用写锁，PostgreSQL/MySQL 使用行锁，SQLite 使用带冲突重试的比较更新，避免多实例并发注册互相覆盖。四种后端也提供版本化通用 KV 和 topic 订阅；Message 的 `topic://name` 分支会在提交时展开为订阅 URL 快照。
+动态分支注册由存储层原子执行：内存后端使用写锁，PostgreSQL/MySQL 使用行锁，SQLite 和 Redis 使用带冲突重试的比较更新，避免多实例并发注册互相覆盖。五种后端也提供版本化通用 KV 和 topic 订阅；Message 的 `topic://name` 分支会在提交时展开为订阅 URL 快照。
 
 ## Rust 客户端
 

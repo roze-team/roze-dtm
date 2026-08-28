@@ -41,6 +41,7 @@ roze-http = { git = "https://github.com/roze-team/roze.git", rev = "217274a13406
 roze-log = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 roze-metrics = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 roze-result = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
+roze-redis = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 roze-rpc = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 roze-service = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
 roze-sqlx = { git = "https://github.com/roze-team/roze.git", rev = "217274a134068f174cbe4a266a011bf719e15d0d" }
@@ -63,6 +64,7 @@ tracing.workspace = true
 roze-grpc.workspace = true
 roze-context.workspace = true
 roze-rpc.workspace = true
+roze-redis.workspace = true
 roze-transaction.workspace = true
 
 [build-dependencies]
