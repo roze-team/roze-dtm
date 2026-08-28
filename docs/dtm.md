@@ -126,6 +126,12 @@ Dashboard API 使用同一组过滤和分页边界，但只返回管理摘要字
 
 Saga 端点只接受 `SagaAction` 分支，并要求补偿地址。
 
+## XA 资源管理器
+
+`roze_dtm::xa::{MySqlXaResourceManager, PostgresXaResourceManager}` 面向业务数据库提供本地 XA 边界。全局事务先通过 `DtmHttpClient::prepare_xa` 创建；每个业务分支调用 `prepare_branch`，在一个独占连接内执行屏障、业务 SQL、`registerXaBranch` 和 Prepare；全局业务成功后调用 `commit_xa`，失败则调用 `rollback_xa`。业务 phase-2 路由根据协调器追加的 `gid`、`branch_id` 和 `op` 构造 `XaBranchDescriptor`，再调用资源管理器的 `resolve`。
+
+MySQL 使用 `XA START/END/PREPARE/COMMIT/ROLLBACK`，PostgreSQL 使用 `BEGIN/PREPARE TRANSACTION/COMMIT PREPARED/ROLLBACK PREPARED`。XID 只允许有界安全 ASCII，避免不能绑定参数的 XA 控制语句发生 SQL 注入；MySQL 的组合资源 ID 额外限制为 64 字节。`recover_prepared` 返回当前数据库仍处于 prepared 状态的资源 ID；重复 Commit/Rollback 映射为 `AlreadyResolved`。`roze_xa_barriers` 必须通过应用迁移或显式 schema 安装创建，PostgreSQL 必须配置非零 `max_prepared_transactions`。
+
 ## 输入边界
 
 - gid 和分支 id 为 1–128 字节；同一事务内分支 id 不可重复。
@@ -140,7 +146,8 @@ Saga 端点只接受 `SagaAction` 分支，并要求补偿地址。
 
 恢复 worker 随 HTTP 服务一起由 `ServiceGroup` 管理，统一响应关闭信号。每轮恢复先竞争持久化租约，同一时刻只有一个实例推进事务。安全恢复路径为：
 
-- TCC：`Submitted -> Prepared -> Succeeded`，或超时/Aborting 后 Cancel。
+- TCC：`Submitted -> Prepared` 后等待显式 Submit；提交决定先持久化为 `Succeeding`，再推进 Confirm 至 `Succeeded`，超时/Aborting 后 Cancel。
+- XA 与二阶段消息同样不会由恢复 worker 将 `Prepared` 猜测为提交决定；只有显式 Submit/Commit 持久化 `Succeeding` 后才执行 phase-2。
 - Saga：`Submitted -> Succeeded`，或超时/Aborting 后补偿。
 - 终态事务原样返回。
 - `Trying`、`Succeeding` 等无法安全整体重放的状态拒绝手工强推，避免重复调用分支。
@@ -153,4 +160,4 @@ Saga 端点只接受 `SagaAction` 分支，并要求补偿地址。
 
 ## 当前边界
 
-已支持内存、SQLite、PostgreSQL、MySQL 与 Redis 存储，Saga、TCC、静态及 callback Workflow、二阶段消息和 XA 协调状态机，HTTP 分支调用、超时、重试、分支屏障、持久化恢复租约、版本化 KV、topic 订阅、自动恢复 worker、callback Workflow 的 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复、原生 Roze HTTP/gRPC 控制面和审计事件。Redis fencing、完整 XA 资源管理器、其他语言 SDK 和管理 Dashboard 仍属于后续扩展；Redis、gRPC 适配器及 callback 恢复仍需完成编译、真实依赖、跨语言互操作和故障注入验证。
+已支持内存、SQLite、PostgreSQL、MySQL 与 Redis 存储，Saga、TCC、静态及 callback Workflow、二阶段消息和 XA 协调状态机，MySQL/PostgreSQL XA 资源管理器，HTTP 分支调用、超时、重试、分支屏障、持久化恢复租约、版本化 KV、topic 订阅、自动恢复 worker、callback Workflow 的 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复、原生 Roze HTTP/gRPC 控制面、脱敏 Dashboard 和审计事件。Redis fencing、XA 启发式决策持久化、其他语言 SDK 与 Dashboard 审计时间线仍属于后续扩展；XA、Redis、gRPC 适配器及 callback 恢复仍需完成编译、真实依赖、跨语言互操作和故障注入验证。

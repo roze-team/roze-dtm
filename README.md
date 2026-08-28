@@ -4,7 +4,8 @@ Roze 的独立分布式事务协调器，默认提供 TCC，并支持 Saga 工�
 
 ## 项目结构
 
-- `src/lib.rs`：DTM 核心库，包含 TCC/Saga 状态机、内存、SQLite、PostgreSQL、MySQL、Redis 存储、HTTP 分支调用和恢复逻辑。
+- `src/lib.rs`：DTM 核心库，包含 TCC、Saga、Workflow、二阶段消息与 XA 状态机，以及内存、SQLite、PostgreSQL、MySQL、Redis 存储、HTTP 分支调用和恢复逻辑。
+- `src/xa.rs`：MySQL/PostgreSQL XA 业务资源管理器、屏障、prepared transaction 扫描与幂等 phase-2。
 - `service/`：独立控制面服务。
 - `proto/dtmgimp.proto`：与 dtm-labs/dtm 保持字段号兼容的 gRPC 协议合同和生成边界。
 - `docs/dtm-grpc.md`：Roze gRPC 生命周期、鉴权、健康检查和客户端契约。
@@ -90,9 +91,15 @@ Dashboard 数据不包含分支 URL、请求载荷、Header、metadata、Workflo
 
 动态分支注册由存储层原子执行：内存后端使用写锁，PostgreSQL/MySQL 使用行锁，SQLite 和 Redis 使用带冲突重试的比较更新，避免多实例并发注册互相覆盖。五种后端也提供版本化通用 KV 和 topic 订阅；Message 的 `topic://name` 分支会在提交时展开为订阅 URL 快照。
 
+## XA Resource Manager
+
+`roze_dtm::xa` 提供 MySQL 与 PostgreSQL 的 Rust 原生 XA 资源管理器。它在同一物理数据库连接中依次执行 XA/本地事务启动、`roze_xa_barriers` 幂等屏障、业务闭包、DTM 分支注册与 Prepare；注册或业务执行失败时失败闭合并回滚。二阶段接口提供 Commit/Rollback、重复 phase-2 的 `AlreadyResolved` 结果以及 prepared transaction 恢复扫描。`DtmHttpClient::xa_global_transaction` 对全局 Prepare、业务闭包和最终 Commit/Rollback 决策进行封装。
+
+应用必须先显式执行 `install_barrier_schema` 或将导出的 `MYSQL_XA_BARRIER_DDL` / `POSTGRES_XA_BARRIER_DDL` 纳入受控迁移。PostgreSQL 还必须配置非零 `max_prepared_transactions`。协调器调用 phase-2 URL 时会保留业务查询参数，并覆盖追加可信的 `gid`、`trans_type=xa`、`branch_id` 和 `op`。
+
 ## Rust 客户端
 
-核心 crate 提供 `roze_dtm::client::DtmHttpClient` 和 `roze_dtm::grpc_client::DtmGrpcClient`。HTTP 客户端支持提交五类事务、逐事务 timeout/retry/Header、callback Workflow、状态转换、事务查询、topic/KV 和兼容 GID；gRPC 客户端覆盖 `dtmgimp.Dtm` 全部方法、提供二进制 Workflow 进度助手并传播 Roze Context。两种客户端均提供 named callback Workflow 助手，按上游 `{name,data}` 合同编码任意二进制数据。恢复 worker 可主动查询 HTTP、JSON-RPC 或 gRPC `QueryPrepared` callback，并持久化有上限的重试调度。生产环境应配置 Bearer token 和 `allowed_branch_origins`。
+核心 crate 提供 `roze_dtm::client::DtmHttpClient` 和 `roze_dtm::grpc_client::DtmGrpcClient`。HTTP 客户端支持提交五类事务、XA Prepare/Commit/Rollback 与资源分支注册、逐事务 timeout/retry/Header、callback Workflow、状态转换、事务查询、topic/KV 和兼容 GID；gRPC 客户端覆盖 `dtmgimp.Dtm` 全部方法、提供二进制 Workflow 进度助手并传播 Roze Context。两种客户端均提供 named callback Workflow 助手，按上游 `{name,data}` 合同编码任意二进制数据。恢复 worker 可主动查询 HTTP、JSON-RPC 或 gRPC `QueryPrepared` callback，并持久化有上限的重试调度。生产环境应配置 Bearer token 和 `allowed_branch_origins`。
 
 ## 上游同步
 

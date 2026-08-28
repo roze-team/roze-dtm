@@ -1,6 +1,6 @@
 [package]
 name = "roze-dtm"
-description = "Roze distributed transaction manager core with TCC and Saga coordination"
+description = "Roze-native distributed transaction coordinator and resource managers"
 edition.workspace = true
 license.workspace = true
 version.workspace = true

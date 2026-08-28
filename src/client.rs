@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, future::Future};
 
 use anyhow::Context as _;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -129,6 +129,89 @@ impl DtmHttpClient {
 
     pub async fn transition(&self, path: &str) -> anyhow::Result<Transaction> {
         self.post_transaction(path, Option::<&()>::None).await
+    }
+
+    /// Creates an empty prepared XA global transaction using the upstream-compatible API.
+    pub async fn prepare_xa(&self, gid: &str) -> anyhow::Result<()> {
+        self.compat_xa_operation("/api/dtmsvr/prepare", gid).await
+    }
+
+    /// Commits all registered XA resource branches.
+    pub async fn commit_xa(&self, gid: &str) -> anyhow::Result<()> {
+        self.compat_xa_operation("/api/dtmsvr/submit", gid).await
+    }
+
+    /// Rolls back all registered XA resource branches.
+    pub async fn rollback_xa(&self, gid: &str) -> anyhow::Result<()> {
+        self.compat_xa_operation("/api/dtmsvr/abort", gid).await
+    }
+
+    /// Runs a global XA decision around one or more resource-branch calls.
+    ///
+    /// The business closure must return failures instead of panicking so the
+    /// client can persist the rollback decision.
+    pub async fn xa_global_transaction<T, F, Fut>(
+        &self,
+        gid: &str,
+        work: F,
+    ) -> anyhow::Result<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = anyhow::Result<T>>,
+    {
+        self.prepare_xa(gid).await?;
+        match work().await {
+            Ok(value) => {
+                self.commit_xa(gid).await?;
+                Ok(value)
+            }
+            Err(error) => {
+                self.rollback_xa(gid)
+                    .await
+                    .context("failed to persist XA rollback decision")?;
+                Err(error.context("XA global business operation failed"))
+            }
+        }
+    }
+
+    /// Registers the endpoint that will resolve one prepared XA resource branch.
+    pub async fn register_xa_branch(
+        &self,
+        gid: &str,
+        branch_id: &str,
+        phase2_url: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !gid.is_empty() && gid.len() <= 128,
+            "XA gid must contain 1 to 128 bytes"
+        );
+        anyhow::ensure!(
+            !branch_id.is_empty() && branch_id.len() <= 128,
+            "XA branch id must contain 1 to 128 bytes"
+        );
+        let url = reqwest::Url::parse(phase2_url).context("invalid XA phase-2 URL")?;
+        anyhow::ensure!(
+            matches!(url.scheme(), "http" | "https")
+                && url.host().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.fragment().is_none(),
+            "XA phase-2 URL must be HTTP(S) without credentials or fragment"
+        );
+        let response = self
+            .authorized(
+                self.client
+                    .post(format!("{}/api/dtmsvr/registerXaBranch", self.base_url))
+                    .json(&serde_json::json!({
+                        "gid": gid,
+                        "trans_type": "xa",
+                        "branch_id": branch_id,
+                        "url": phase2_url,
+                    })),
+            )
+            .send()
+            .await?;
+        decode_compat_success(response).await
     }
 
     pub async fn get(&self, gid: &str) -> anyhow::Result<Transaction> {
@@ -333,6 +416,23 @@ impl DtmHttpClient {
                 self.client
                     .get(format!("{}{}", self.base_url, path))
                     .query(query),
+            )
+            .send()
+            .await?;
+        decode_compat_success(response).await
+    }
+
+    async fn compat_xa_operation(&self, path: &str, gid: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(!gid.is_empty() && gid.len() <= 128, "invalid XA gid");
+        let response = self
+            .authorized(
+                self.client
+                    .post(format!("{}{}", self.base_url, path))
+                    .json(&serde_json::json!({
+                        "gid": gid,
+                        "trans_type": "xa",
+                        "wait_result": true,
+                    })),
             )
             .send()
             .await?;

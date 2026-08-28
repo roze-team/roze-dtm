@@ -21,6 +21,7 @@ pub mod grpc_client;
 pub mod kv;
 pub mod pb;
 pub mod redis_store;
+pub mod xa;
 
 pub use kv::{KvEntry, Topic, TopicSubscriber, TOPICS_CATEGORY};
 pub use redis_store::{
@@ -2978,7 +2979,19 @@ where
             ][..],
         };
         ensure_status(&tx, allowed)?;
-        if tx.kind == TransactionKind::Workflow && tx.status == TransactionStatus::Prepared {
+        if (matches!(tx.kind, TransactionKind::Tcc | TransactionKind::Xa)
+            && tx.status == TransactionStatus::Prepared)
+            || (tx.kind == TransactionKind::Message
+                && matches!(
+                    tx.status,
+                    TransactionStatus::Submitted | TransactionStatus::Prepared
+                ))
+        {
+            tx.status = TransactionStatus::Succeeding;
+            self.store.update_transaction(tx.clone()).await?;
+        } else if tx.kind == TransactionKind::Workflow
+            && tx.status == TransactionStatus::Prepared
+        {
             tx.status = TransactionStatus::Submitted;
             self.store.update_transaction(tx.clone()).await?;
         }
@@ -3595,6 +3608,7 @@ where
                     .confirm
                     .clone()
                     .ok_or_else(|| anyhow::anyhow!("missing XA commit URL for {}", branch.id))?;
+                let commit = xa_phase2_callback_url(&commit, &tx.gid, &branch.id, "commit")?;
                 branch.attempts = branch.attempts.saturating_add(1);
                 if self
                     .invoke_url(&execution_options, branch, &commit)
@@ -3637,6 +3651,8 @@ where
                     .cancel
                     .clone()
                     .ok_or_else(|| anyhow::anyhow!("missing XA rollback URL for {}", branch.id))?;
+                let rollback =
+                    xa_phase2_callback_url(&rollback, &tx.gid, &branch.id, "rollback")?;
                 branch.attempts = branch.attempts.saturating_add(1);
                 if self
                     .invoke_url(&execution_options, branch, &rollback)
@@ -3856,10 +3872,10 @@ where
                     TransactionKind::Tcc,
                     TransactionStatus::Submitted | TransactionStatus::Trying,
                 ) => self.prepare_tcc(&tx.gid).await?,
-                (
-                    TransactionKind::Tcc,
-                    TransactionStatus::Prepared | TransactionStatus::Succeeding,
-                ) => self.confirm_tcc(&tx.gid).await?,
+                (TransactionKind::Tcc, TransactionStatus::Prepared) => continue,
+                (TransactionKind::Tcc, TransactionStatus::Succeeding) => {
+                    self.confirm_tcc(&tx.gid).await?
+                }
                 (TransactionKind::Tcc, TransactionStatus::Aborting) => {
                     self.cancel_tcc(&tx.gid).await?
                 }
@@ -3882,17 +3898,17 @@ where
                 (TransactionKind::Message, TransactionStatus::Submitted) => {
                     self.prepare_message(&tx.gid).await?
                 }
-                (
-                    TransactionKind::Message,
-                    TransactionStatus::Prepared | TransactionStatus::Succeeding,
-                ) => self.dispatch_message(&tx.gid).await?,
+                (TransactionKind::Message, TransactionStatus::Prepared) => continue,
+                (TransactionKind::Message, TransactionStatus::Succeeding) => {
+                    self.dispatch_message(&tx.gid).await?
+                }
                 (TransactionKind::Xa, TransactionStatus::Submitted) => {
                     self.prepare_xa(&tx.gid).await?
                 }
-                (
-                    TransactionKind::Xa,
-                    TransactionStatus::Prepared | TransactionStatus::Succeeding,
-                ) => self.commit_xa(&tx.gid).await?,
+                (TransactionKind::Xa, TransactionStatus::Prepared) => continue,
+                (TransactionKind::Xa, TransactionStatus::Succeeding) => {
+                    self.commit_xa(&tx.gid).await?
+                }
                 (TransactionKind::Xa, TransactionStatus::Aborting) => {
                     self.rollback_xa(&tx.gid).await?
                 }
@@ -3992,6 +4008,39 @@ fn append_dynamic_branch(tx: &mut Transaction, branch: Branch) -> anyhow::Result
     tx.branches.push(branch);
     tx.updated_at_millis = current_millis();
     Ok(())
+}
+
+fn xa_phase2_callback_url(
+    value: &str,
+    gid: &str,
+    branch_id: &str,
+    operation: &str,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(matches!(operation, "commit" | "rollback"), "invalid XA phase-2 operation");
+    let mut url = parse_branch_url(value)?;
+    let retained = url
+        .query_pairs()
+        .filter(|(name, _)| {
+            !matches!(
+                name.as_ref(),
+                "gid" | "trans_type" | "branch_id" | "op"
+            )
+        })
+        .map(|(name, value)| (name.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    url.set_query(None);
+    {
+        let mut query = url.query_pairs_mut();
+        for (name, value) in retained {
+            query.append_pair(&name, &value);
+        }
+        query
+            .append_pair("gid", gid)
+            .append_pair("trans_type", "xa")
+            .append_pair("branch_id", branch_id)
+            .append_pair("op", operation);
+    }
+    Ok(url.into())
 }
 
 fn append_workflow_progress(
@@ -4929,6 +4978,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepared_xa_waits_for_an_explicit_global_decision() {
+        let dtm = Dtm::new(InMemoryTransactionStore::new());
+        dtm.submit(Transaction::xa(
+            "gid-xa-decision",
+            vec![Branch::xa(
+                "account",
+                "https://account.example.com/xa",
+                "https://account.example.com/xa",
+                serde_json::json!({}),
+            )],
+        ))
+        .await
+        .expect("submit XA");
+        dtm.prepare_xa("gid-xa-decision")
+            .await
+            .expect("prepare XA");
+
+        assert!(dtm.tick_recover_once().await.expect("idle recovery").is_empty());
+        let prepared = dtm
+            .store()
+            .get_transaction("gid-xa-decision")
+            .await
+            .expect("read XA")
+            .expect("XA exists");
+        assert_eq!(prepared.status, TransactionStatus::Prepared);
+
+        let scheduled = dtm
+            .schedule_submit("gid-xa-decision")
+            .await
+            .expect("persist commit decision");
+        assert_eq!(scheduled.status, TransactionStatus::Succeeding);
+        let committed = dtm.tick_recover_once().await.expect("commit XA");
+        assert_eq!(committed.len(), 1);
+        assert_eq!(committed[0].status, TransactionStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn prepared_tcc_and_message_wait_for_submit() {
+        let dtm = Dtm::new(InMemoryTransactionStore::new());
+        dtm.submit(Transaction::tcc("gid-tcc-decision", Vec::new()))
+            .await
+            .expect("submit TCC");
+        dtm.prepare_tcc("gid-tcc-decision")
+            .await
+            .expect("prepare TCC");
+        dtm.submit(Transaction::message("gid-message-decision", Vec::new()))
+            .await
+            .expect("submit message");
+        dtm.prepare_message("gid-message-decision")
+            .await
+            .expect("prepare message");
+
+        assert!(dtm.tick_recover_once().await.expect("idle recovery").is_empty());
+        assert_eq!(
+            dtm.store()
+                .get_transaction("gid-tcc-decision")
+                .await
+                .expect("read TCC")
+                .expect("TCC exists")
+                .status,
+            TransactionStatus::Prepared
+        );
+        assert_eq!(
+            dtm.store()
+                .get_transaction("gid-message-decision")
+                .await
+                .expect("read message")
+                .expect("message exists")
+                .status,
+            TransactionStatus::Prepared
+        );
+
+        assert_eq!(
+            dtm.schedule_submit("gid-tcc-decision")
+                .await
+                .expect("persist TCC submit decision")
+                .status,
+            TransactionStatus::Succeeding
+        );
+        assert_eq!(
+            dtm.schedule_submit("gid-message-decision")
+                .await
+                .expect("persist message submit decision")
+                .status,
+            TransactionStatus::Succeeding
+        );
+        let completed = dtm.tick_recover_once().await.expect("apply submit decisions");
+        assert_eq!(completed.len(), 2);
+        assert!(completed
+            .iter()
+            .all(|transaction| transaction.status == TransactionStatus::Succeeded));
+    }
+
+    #[tokio::test]
     async fn callback_workflow_preserves_composite_progress_and_binary_data() {
         let dtm = Dtm::new(InMemoryTransactionStore::new());
         let mut workflow = Transaction::workflow("gid-callback-workflow", Vec::new());
@@ -5079,6 +5222,24 @@ mod tests {
         let target = parse_grpc_callback_target(&callback.url).expect("HTTPS gRPC target");
         assert_eq!(target.endpoint, "https://workflow.example.com");
         assert_eq!(target.method, "/workflow.Workflow/Execute");
+    }
+
+    #[test]
+    fn xa_phase2_callback_replaces_reserved_query_parameters() {
+        let url = xa_phase2_callback_url(
+            "https://business.example.com/xa?tenant=roze&gid=untrusted&op=action",
+            "order-2026",
+            "01",
+            "commit",
+        )
+        .expect("XA phase-2 URL");
+        let url = reqwest::Url::parse(&url).expect("parse XA phase-2 URL");
+        let query = url.query_pairs().into_owned().collect::<BTreeMap<_, _>>();
+        assert_eq!(query["tenant"], "roze");
+        assert_eq!(query["gid"], "order-2026");
+        assert_eq!(query["trans_type"], "xa");
+        assert_eq!(query["branch_id"], "01");
+        assert_eq!(query["op"], "commit");
     }
 
     #[test]
