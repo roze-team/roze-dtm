@@ -28,7 +28,7 @@ bash scripts/redis-integration.sh
 - 普通控制面写入与恢复写入并发时，stale transaction revision 被拒绝且动态分支不会被静默覆盖。
 - Cluster MOVED/ASK、节点重启、主从切换、断连恢复及同槽脚本行为。
 
-当前状态：服务端时间 + epoch 租约、恢复 fenced store、事务 revision/payload CAS、Workflow/屏障 fenced Lua 和 ignored integration tests 已加入源码；workspace 编译、单元测试和 Clippy 已在本地通过。CI 会为每个提交启动 Redis standalone 与三节点 Cluster 并强制运行两组 ignored 集成测试。本机没有 Redis/Docker，因此当前修订的真实 Redis 结果以 CI 为准；MOVED/ASK、节点重启、主从切换、网络分区和长时间运行仍为 `inconclusive`。
+当前状态：服务端时间 + epoch 租约、恢复 fenced store、事务 revision/payload CAS、Workflow/屏障 fenced Lua 和 ignored integration tests 已加入源码；workspace 编译、单元测试和 Clippy 已在本地通过。CI 已启动 Redis standalone 与三节点 Cluster 并通过两组真实集成测试；MOVED/ASK、节点重启、主从切换、网络分区和长时间运行仍为 `inconclusive`。
 
 ## 协议互操作
 
@@ -50,7 +50,7 @@ HTTP、JSON-RPC 和 gRPC 兼容协议需要使用固定上游客户端版本执�
 
 MySQL 验证必须启用 InnoDB，并为执行恢复扫描的受限资源管理账户授予全局动态权限 `XA_RECOVER_ADMIN`；该账户不应获得 root 或无关的全局写权限。测试要覆盖 XA START 之后、分支注册之后、XA PREPARE 之后和全局决策之后的进程中断；PostgreSQL 必须配置非零 `max_prepared_transactions` 并覆盖相同崩溃点。两种数据库都要验证 `roze_xa_barriers` 原子去重、重复 Commit/Rollback、`recover_prepared` 对账、注册失败回滚、网络超时重试、未知 XID，以及协调器追加的 `gid/trans_type/branch_id/op` 不可被 phase-2 URL 原查询参数覆盖。人工 Commit/Rollback 必须验证 `roze_xa_decisions` 的 intent-first 写入、decision id 幂等与冲突拒绝、失败后重试、终态复用、`reconcile` 双向差集，以及原因不进入日志、指标或 Dashboard。
 
-当前状态：MySQL/PostgreSQL 资源管理器、固定 XID 校验、屏障与启发式决策 DDL、intent-first 决策持久化、prepared transaction 双向对账和 phase-2 参数覆盖已加入，并通过本地编译、单元测试与 Clippy。`tests/xa_backends.rs` 对两种真实数据库验证 Prepare、Commit、Rollback、屏障去重、prepared 扫描、启发式 decision id 幂等与对账；CI 启用 PostgreSQL prepared transactions 后强制运行。本机没有数据库服务，因此当前修订的真实 XA 结果以 CI 为准；进程崩溃点、网络超时和未知 XID 故障注入仍为 `inconclusive`。
+当前状态：MySQL/PostgreSQL 资源管理器、固定 XID 校验、屏障与启发式决策 DDL、intent-first 决策持久化、prepared transaction 双向对账和 phase-2 参数覆盖已加入，并通过本地编译、单元测试与 Clippy。`tests/xa_backends.rs` 已在两种真实数据库通过 Prepare、Commit、Rollback、屏障去重、prepared 扫描、启发式 decision id 幂等与对账；CI 同时验证 PostgreSQL prepared transactions 和 MySQL `XA_RECOVER_ADMIN` 最小权限拓扑。进程崩溃点、网络超时和未知 XID 故障注入仍为 `inconclusive`。
 
 ## Dashboard
 

@@ -77,7 +77,7 @@ for phrase in [
     "Roze 原生替代，不作为未迁移缺口",
     "编译禁令解除后的验收进展",
     "cargo fmt --all -- --check",
-    "真实依赖结果等待当前提交 CI",
+    "完整本地短时验收与真实依赖 CI 已通过",
     "24h/72h soak",
 ]:
     assert phrase in CLOSURE, {"missing_closure_statement": phrase}

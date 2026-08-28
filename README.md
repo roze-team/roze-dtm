@@ -35,7 +35,7 @@ cargo run -p roze-dtm-service
 ROZE_DTM_CONTROL_TOKEN='roze-dtm-smoke-token-32-bytes!!' \
 node scripts/local-protocol-integration.mjs
 
-ROZE_DTM_GRPC_URL=http://127.0.0.1:36791 \
+ROZE_DTM_GRPC_ENDPOINT=http://127.0.0.1:36791 \
 ROZE_DTM_CONTROL_TOKEN='roze-dtm-smoke-token-32-bytes!!' \
 cargo run --example grpc_smoke
 ```

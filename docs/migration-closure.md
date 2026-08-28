@@ -34,16 +34,16 @@
 
 - `cargo fmt --all -- --check`、`cargo check --workspace --all-targets`、Clippy `-D warnings` 和 workspace 全目标测试已经通过，包含 proto 生成、Workflow DAG 与 XA 源码测试。
 - 使用 `service/config.sqlite.smoke.yaml` 启动的真实 Roze 服务已经通过 HTTP 五事务模式、JSON-RPC Saga、Rust gRPC 客户端、受保护 Dashboard/管理动作、指标检查和可恢复 Message 503 分支故障。
-- `tests/xa_backends.rs` 与 CI 真实依赖矩阵已覆盖 PostgreSQL/MySQL XA Commit/Rollback/屏障/对账、Redis standalone 和三节点 Redis Cluster；本机缺少 Docker 与这些服务，最终结果必须由当前提交对应的 GitHub Actions 证明。
+- `tests/xa_backends.rs` 与 CI 真实依赖矩阵已覆盖并通过 PostgreSQL/MySQL XA Commit/Rollback/屏障/对账、Redis standalone 和三节点 Redis Cluster；MySQL 验收还固定了 `XA_RECOVER_ADMIN` 最小恢复权限。
 
 ## 剩余运行门槛
 
 以下事项不能用更多源码声明或一次短时 smoke 替代：
 
 1. 固定 dtm-labs Go/Node 客户端与 Rust/TypeScript/JavaScript 客户端的完整跨语言互操作，特别是 callback Workflow 错误码、TLS、超时和终态竞争。
-2. PostgreSQL/MySQL/Redis CI 矩阵通过后，继续覆盖 Redis MOVED/ASK、节点重启、主从切换、网络分区，以及关系型存储升级读取和多 worker 接管。
+2. 在已通过的 PostgreSQL/MySQL/Redis CI 矩阵之上，继续覆盖 Redis MOVED/ASK、节点重启、主从切换、网络分区，以及关系型存储升级读取和多 worker 接管。
 3. XA 在 Prepare 前后、分支注册后、全局决策后发生进程崩溃或网络超时的恢复，以及未知 XID。
 4. 真实 HTTPS 告警接收端、重定向拒绝、进程重启、持久审计 sink 和 Dashboard 暗色模式端到端。
 5. 绑定确切 Git revision 的 24h/72h soak、资源趋势、错误预算和故障时间线证据。
 
-因此当前判定为“源码与静态迁移已收口，完整本地短时验收已通过；真实依赖结果等待当前提交 CI，生产稳定性仍为 `inconclusive`”。在剩余运行门槛完成前，`docs/roadmap.md` 和 `docs/production-validation.md` 不得标记为生产稳定。
+因此当前判定为“源码与静态迁移已收口，完整本地短时验收与真实依赖 CI 已通过；生产稳定性仍为 `inconclusive`”。在剩余运行门槛完成前，`docs/roadmap.md` 和 `docs/production-validation.md` 不得标记为生产稳定。
