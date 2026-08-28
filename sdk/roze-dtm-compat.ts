@@ -1,4 +1,4 @@
-import { RozeDtmApiError, type FetchLike, type JsonValue, type RequestOptions, type Transaction } from "./roze-dtm.js";
+import { RozeDtmApiError, type FetchLike, type JsonValue, type RequestOptions } from "./roze-dtm.js";
 
 export type CompatTransactionType = "tcc" | "saga" | "workflow" | "msg" | "message" | "xa";
 export interface CompatTransactionRequest {
@@ -18,7 +18,26 @@ export interface CompatAllQuery {
   gid?: string; transType?: CompatTransactionType; status?: string; position?: string;
   limit?: number; createTimeStart?: number; createTimeEnd?: number;
 }
-export interface KvEntry { cat: string; k: string; v: string; version: number; created_at_millis: number; updated_at_millis: number }
+export interface CompatGlobalTransaction {
+  id: number; create_time: string; update_time: string; gid: string;
+  trans_type: "tcc" | "saga" | "workflow" | "msg" | "xa";
+  status: "prepared" | "submitted" | "succeed" | "failed" | "aborting";
+  protocol: "http" | "json-rpc" | "grpc" | string;
+  finish_time?: string; rollback_time?: string; result?: string; rollback_reason?: string;
+  options: string; custom_data?: string; query_prepared?: string;
+  next_cron_interval?: number; next_cron_time?: string;
+  timeout_to_fail?: number; request_timeout?: number; retry_interval?: number;
+  wait_result?: boolean; branch_headers?: Record<string, string>; concurrent: boolean; retry_limit?: number;
+}
+export interface CompatBranchTransaction {
+  id: number; create_time: string; update_time: string; gid: string;
+  url?: string; bin_data?: string; branch_id: string; op: string;
+  status: "prepared" | "succeed" | "failed"; finish_time?: string; rollback_time?: string;
+}
+export interface KvEntry {
+  id: number; create_time: string; update_time: string;
+  cat: string; k: string; v: string; version: number;
+}
 export interface CompatSuccess { dtm_result: "SUCCESS" }
 export interface CompatWorkflowSnapshot {
   transaction: { gid: string; status: string; rollback_reason: string; result: string };
@@ -61,8 +80,8 @@ export class RozeDtmCompatClient {
 
   version(options?: RequestOptions) { return this.raw<{ version: string; release_revision: string | null }>("GET", "/api/dtmsvr/version", undefined, undefined, options, false); }
   newGid(options?: RequestOptions) { return this.compat<{ gid: string; dtm_result: "SUCCESS" }>("GET", "/api/dtmsvr/newGid", undefined, undefined, options); }
-  query(gid: string, options?: RequestOptions) { return this.compat<{ transaction: Transaction; branches: Transaction["branches"]; dtm_result: "SUCCESS" }>("GET", "/api/dtmsvr/query", { gid }, undefined, options); }
-  all(query: CompatAllQuery = {}, options?: RequestOptions) { return this.compat<{ transactions: Transaction[]; next_position: string; dtm_result: "SUCCESS" }>("GET", "/api/dtmsvr/all", query, undefined, options); }
+  query(gid: string, options?: RequestOptions) { return this.compat<{ transaction: CompatGlobalTransaction; branches: CompatBranchTransaction[]; dtm_result: "SUCCESS" }>("GET", "/api/dtmsvr/query", { gid }, undefined, options); }
+  all(query: CompatAllQuery = {}, options?: RequestOptions) { return this.compat<{ transactions: CompatGlobalTransaction[]; next_position: string; dtm_result: "SUCCESS" }>("GET", "/api/dtmsvr/all", query, undefined, options); }
   prepare(body: CompatTransactionRequest, options?: RequestOptions) { return this.write("prepare", body, options); }
   submit(body: CompatTransactionRequest, options?: RequestOptions) { return this.write("submit", body, options); }
   abort(body: CompatTransactionRequest, options?: RequestOptions) { return this.write("abort", body, options); }

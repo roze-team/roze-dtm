@@ -46,6 +46,26 @@ assert schemas["DashboardSnapshot"]["properties"]["transactions"] == {
 assert schemas["DashboardTransactionRow"]["properties"]["available_actions"]["items"][
     "enum"
 ] == ["reset-retry", "force-stop"]
+for path, schema in {
+    "/api/dtmsvr/query": "CompatQueryResponse",
+    "/api/dtmsvr/all": "CompatAllResponse",
+    "/api/dtmsvr/scanKV": "CompatKvScanResponse",
+    "/api/dtmsvr/queryKV": "CompatKvResponse",
+}.items():
+    actual = document["paths"][path]["get"]["responses"]["200"]["content"][
+        "application/json"
+    ]["schema"]
+    assert actual == {"$ref": f"#/components/schemas/{schema}"}, (path, actual)
+assert schemas["CompatGlobalTransaction"]["properties"]["trans_type"]["enum"] == [
+    "tcc", "saga", "workflow", "msg", "xa"
+]
+assert schemas["CompatGlobalTransaction"]["properties"]["status"]["enum"] == [
+    "prepared", "submitted", "succeed", "aborting", "failed"
+]
+assert schemas["CompatBranchTransaction"]["properties"]["bin_data"][
+    "contentEncoding"
+] == "base64"
+assert "created_at_millis" not in schemas["CompatGlobalTransaction"]["properties"]
 assert all(tag.get("description") for tag in document["tags"])
 assert len(paths) == 54
 print(

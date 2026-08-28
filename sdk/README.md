@@ -24,6 +24,8 @@ const transaction = await dtm.submitSaga({
 
 `roze-dtm-compat.ts` 和 `roze-dtm-compat.js` 覆盖 `/api/dtmsvr/**` 的版本、GID、事务操作、动态分支、callback Workflow、查询分页、恢复管理、topic/KV，以及 `/api/json-rpc` 的五个方法。`version()` 同时返回包版本和可空的部署 Git revision。客户端按上游原始 `dtm_result` 或 JSON-RPC 2.0 合同处理响应，不会将其误当作 Roze envelope。
 
+`query()` / `all()` 返回 `CompatGlobalTransaction` 和 `CompatBranchTransaction`，字段、`msg` 类型、`succeed` 状态、RFC 3339 时间与 Base64 `bin_data` 对齐固定上游管理协议；`scanKv()` / `queryKv()` 返回上游 `id/create_time/update_time/cat/k/v/version` 结构。这些兼容 DTO 与原生 SDK 的 `Transaction` 类型有意分离。
+
 ```ts
 import { concurrentSagaCustomData, messageDelayCustomData, RozeDtmCompatClient } from "./roze-dtm-compat.js";
 

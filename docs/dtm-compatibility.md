@@ -30,6 +30,10 @@
 
 兼容响应保留 `dtm_result: SUCCESS/FAILURE`。启用 `control_token` 时，兼容端点和 `/v1/**` 一样要求 Bearer token。
 
+`query`、`all`、`scanKV` 和 `queryKV` 返回上游存储 DTO 的线级字段，而不是 Roze 原生 `Transaction`/`KvEntry`：事务使用 `trans_type`、`create_time`、`update_time`，Message 类型写作 `msg`，成功状态写作 `succeed`；分支使用 `branch_id`、`op`、`url`、Base64 `bin_data`；KV 使用 `cat`、`k`、`v`。时间统一序列化为 UTC RFC 3339，事务选项维持上游秒单位。Roze 的存储主键并非 dtm-labs 数据库自增键，因此仅为兼容字段返回稳定的非业务占位值 `id: 0`，客户端不得把该字段当作资源标识，事务标识始终是 `gid`。
+
+兼容查询会按上游操作形态展开 Roze 分支：Saga 为 `compensate/action`，TCC 为 `cancel/confirm`，XA 为 `rollback/commit`，Message 为 `action`；Workflow 则返回已登记的进度分支。只有受保护的兼容查询会返回分支 URL、二进制载荷和选项 Header；Roze Dashboard 与 `/v1/dashboard` 始终使用独立的有界脱敏模型。
+
 `all` 接受上游字段 `createTimeStart`、`createTimeEnd`（Unix 毫秒时间戳，边界包含），并以创建时间倒序、GID 倒序稳定分页。`position` 是上一页末项的唯一 GID，不应解析或自行构造；空字符串表示首页或没有下一页，无效游标及倒置时间范围会返回 `FAILURE`。`resetCronTime` 的 `timeout` 单位为秒，缺省值为 105 秒；它只重置恢复时间晚于“当前时间 + timeout”的事务，批次之外仍有匹配项时 `has_remaining=true`。
 
 并发 Saga 兼容上游 `custom_data`：`{"concurrent":true,"orders":{"2":[0,1]}}` 表示零基分支 2 必须在分支 0 和 1 成功后执行。Roze 将其转换为持久化分支 id 依赖图，按依赖就绪层并发执行，并按逆依赖层补偿。分支和依赖索引必须在范围内，且依赖必须位于当前分支之前；非法或成环图会失败闭合。

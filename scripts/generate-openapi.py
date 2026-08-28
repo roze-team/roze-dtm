@@ -201,6 +201,70 @@ schemas = {
     "CompatVersion": {"type": "object", "required": ["version", "release_revision"], "properties": {
         "version": {"type": "string"}, "release_revision": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
     }},
+    "CompatGlobalTransaction": {"type": "object", "additionalProperties": False,
+        "required": ["id", "create_time", "update_time", "gid", "trans_type", "status", "protocol", "options", "concurrent"],
+        "properties": {
+            "id": {"type": "integer", "minimum": 0},
+            "create_time": {"type": "string", "format": "date-time"},
+            "update_time": {"type": "string", "format": "date-time"},
+            "gid": {"type": "string"},
+            "trans_type": {"type": "string", "enum": ["tcc", "saga", "workflow", "msg", "xa"]},
+            "status": {"type": "string", "enum": ["prepared", "submitted", "succeed", "aborting", "failed"]},
+            "protocol": {"type": "string"},
+            "finish_time": {"type": "string", "format": "date-time"},
+            "rollback_time": {"type": "string", "format": "date-time"},
+            "result": {"type": "string"}, "rollback_reason": {"type": "string"},
+            "options": {"type": "string", "contentMediaType": "application/json"},
+            "custom_data": {"type": "string"}, "query_prepared": {"type": "string"},
+            "next_cron_interval": {"type": "integer", "minimum": 0},
+            "next_cron_time": {"type": "string", "format": "date-time"},
+            "timeout_to_fail": {"type": "integer", "minimum": 0},
+            "request_timeout": {"type": "integer", "minimum": 0},
+            "retry_interval": {"type": "integer", "minimum": 0},
+            "wait_result": {"type": "boolean"}, "branch_headers": string_map,
+            "concurrent": {"type": "boolean"}, "retry_limit": {"type": "integer", "minimum": 0},
+        }},
+    "CompatBranchTransaction": {"type": "object", "additionalProperties": False,
+        "required": ["id", "create_time", "update_time", "gid", "branch_id", "op", "status"],
+        "properties": {
+            "id": {"type": "integer", "minimum": 0},
+            "create_time": {"type": "string", "format": "date-time"},
+            "update_time": {"type": "string", "format": "date-time"},
+            "gid": {"type": "string"}, "url": {"type": "string"}, "bin_data": {"type": "string", "contentEncoding": "base64"},
+            "branch_id": {"type": "string"}, "op": {"type": "string"},
+            "status": {"type": "string", "enum": ["prepared", "succeed", "failed"]},
+            "finish_time": {"type": "string", "format": "date-time"},
+            "rollback_time": {"type": "string", "format": "date-time"},
+        }},
+    "CompatKvEntry": {"type": "object", "additionalProperties": False,
+        "required": ["id", "create_time", "update_time", "cat", "k", "v", "version"],
+        "properties": {
+            "id": {"type": "integer", "minimum": 0},
+            "create_time": {"type": "string", "format": "date-time"},
+            "update_time": {"type": "string", "format": "date-time"},
+            "cat": {"type": "string"}, "k": {"type": "string"}, "v": {"type": "string"},
+            "version": {"type": "integer", "minimum": 0},
+        }},
+    "CompatQueryResponse": {"type": "object", "additionalProperties": False,
+        "required": ["transaction", "branches", "dtm_result"], "properties": {
+            "transaction": ref("CompatGlobalTransaction"),
+            "branches": {"type": "array", "items": ref("CompatBranchTransaction")},
+            "dtm_result": {"const": "SUCCESS"},
+        }},
+    "CompatAllResponse": {"type": "object", "additionalProperties": False,
+        "required": ["transactions", "next_position", "dtm_result"], "properties": {
+            "transactions": {"type": "array", "items": ref("CompatGlobalTransaction")},
+            "next_position": {"type": "string"}, "dtm_result": {"const": "SUCCESS"},
+        }},
+    "CompatKvResponse": {"type": "object", "additionalProperties": False,
+        "required": ["kv", "dtm_result"], "properties": {
+            "kv": {"type": "array", "items": ref("CompatKvEntry")}, "dtm_result": {"const": "SUCCESS"},
+        }},
+    "CompatKvScanResponse": {"type": "object", "additionalProperties": False,
+        "required": ["kv", "next_position", "dtm_result"], "properties": {
+            "kv": {"type": "array", "items": ref("CompatKvEntry")},
+            "next_position": {"type": "string"}, "dtm_result": {"const": "SUCCESS"},
+        }},
     "CompatPayload": {"type": "object", "required": ["dtm_result"], "properties": {"dtm_result": {"enum": ["SUCCESS", "FAILURE"]}}, "additionalProperties": True},
     "JsonRpcRequest": {"type": "object", "required": ["jsonrpc", "id", "method"], "properties": {
         "jsonrpc": {"const": "2.0"}, "id": ref("JsonValue"), "method": {"enum": ["newGid", "prepare", "submit", "abort", "registerBranch"]}, "params": ref("JsonValue"),
@@ -261,7 +325,13 @@ compat_params = {
     "queryKV": [query("cat"), query("key")],
 }
 for name in compat_gets:
-    response_schema = ref("CompatVersion") if name == "version" else ref("CompatPayload")
+    response_schema = {
+        "version": ref("CompatVersion"),
+        "query": ref("CompatQueryResponse"),
+        "all": ref("CompatAllResponse"),
+        "scanKV": ref("CompatKvScanResponse"),
+        "queryKV": ref("CompatKvResponse"),
+    }.get(name, ref("CompatPayload"))
     paths[f"/api/dtmsvr/{name}"] = {"get": operation("compat" + name[0].upper() + name[1:], "Compatibility", response_schema, params=compat_params.get(name), public=name == "version")}
 for name in ["prepare", "submit", "abort"]:
     paths[f"/api/dtmsvr/{name}"] = {"post": operation("compat" + name.title(), "Compatibility", ref("CompatSuccess"), body="CompatTransactionRequest")}

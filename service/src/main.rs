@@ -15,7 +15,7 @@ use http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use roze_dtm::{
     validate_redis_namespace, validate_saga_dependencies, AlertWebhookConfig, Branch, BranchKind,
     BranchStatus, BranchUrlPolicy, Dtm, DtmOptions, HttpBranchInvoker, InMemoryTransactionStore,
-    MySqlTransactionStore, PostgresTransactionStore, RedisTransactionStore,
+    KvEntry, MySqlTransactionStore, PostgresTransactionStore, RedisTransactionStore,
     SqliteTransactionStore, Transaction, TransactionKind, TransactionOptions, TransactionStatus,
     TransactionStore, WorkflowProgress, WorkflowProgressStatus,
 };
@@ -534,6 +534,81 @@ struct CompatQuery {
     create_time_end: Option<u64>,
 }
 
+#[derive(Serialize)]
+struct CompatGlobalTransaction {
+    id: u64,
+    create_time: String,
+    update_time: String,
+    gid: String,
+    trans_type: String,
+    status: String,
+    protocol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finish_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rollback_time: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    result: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    rollback_reason: String,
+    options: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    custom_data: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    query_prepared: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cron_interval: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cron_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeout_to_fail: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_timeout: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_interval: Option<u64>,
+    #[serde(skip_serializing_if = "is_false")]
+    wait_result: bool,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    branch_headers: BTreeMap<String, String>,
+    concurrent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_limit: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct CompatBranchTransaction {
+    id: u64,
+    create_time: String,
+    update_time: String,
+    gid: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    url: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    bin_data: String,
+    branch_id: String,
+    op: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finish_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rollback_time: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CompatKvEntry {
+    id: u64,
+    create_time: String,
+    update_time: String,
+    cat: String,
+    k: String,
+    v: String,
+    version: u64,
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct CompatResetCronQuery {
@@ -1019,11 +1094,15 @@ async fn compat_query(
         return compat_failure("no gid specified");
     };
     match state.dtm.store().get_transaction(&gid).await {
-        Ok(Some(transaction)) => compat_response(serde_json::json!({
-            "transaction": &transaction,
-            "branches": &transaction.branches,
-            "dtm_result": "SUCCESS"
-        })),
+        Ok(Some(transaction)) => {
+            let global = compat_global_transaction(&transaction);
+            let branches = compat_branch_transactions(&transaction);
+            compat_response(serde_json::json!({
+                "transaction": global,
+                "branches": branches,
+                "dtm_result": "SUCCESS"
+            }))
+        }
         Ok(None) => compat_failure("transaction not found"),
         Err(_) => compat_failure("storage failure"),
     }
@@ -1065,11 +1144,17 @@ fn build_compat_all_response(
                 && query
                     .trans_type
                     .as_deref()
-                    .is_none_or(|kind| kind_name(tx.kind) == kind)
+                    .is_none_or(|kind| {
+                        compat_kind_name(tx.kind) == kind
+                            || tx.kind == TransactionKind::Message && kind == "message"
+                    })
                 && query
                     .status
                     .as_deref()
-                    .is_none_or(|status| status_name(tx.status) == status)
+                    .is_none_or(|status| {
+                        compat_status_name(tx.status) == status
+                            || tx.status == TransactionStatus::Succeeded && status == "succeeded"
+                    })
                 && query
                     .create_time_start
                     .is_none_or(|start| tx.created_at_millis >= start)
@@ -1104,11 +1189,257 @@ fn build_compat_all_response(
         .then(|| items.last().map(|transaction| transaction.gid.clone()))
         .flatten()
         .unwrap_or_default();
+    let transactions = items
+        .iter()
+        .map(compat_global_transaction)
+        .collect::<Vec<_>>();
     Ok(serde_json::json!({
-        "transactions": items,
+        "transactions": transactions,
         "next_position": next_position,
         "dtm_result": "SUCCESS"
     }))
+}
+
+fn compat_global_transaction(transaction: &Transaction) -> CompatGlobalTransaction {
+    let next_retry_millis = transaction
+        .branches
+        .iter()
+        .filter_map(|branch| branch.next_retry_millis)
+        .min();
+    let retry_interval = transaction.options.retry_interval_millis.map(millis_to_seconds);
+    let request_timeout = transaction.options.request_timeout_millis.map(millis_to_seconds);
+    let timeout_to_fail = transaction.timeout_millis.map(millis_to_seconds);
+    let branch_headers = transaction
+        .metadata
+        .get("dtm.branch_headers")
+        .and_then(|value| serde_json::from_str(value).ok())
+        .unwrap_or_default();
+    let options = compat_options_json(
+        transaction,
+        timeout_to_fail,
+        request_timeout,
+        retry_interval,
+        &branch_headers,
+    );
+    let terminal_time = transaction
+        .status
+        .is_terminal()
+        .then(|| compat_rfc3339(transaction.updated_at_millis));
+    CompatGlobalTransaction {
+        id: 0,
+        create_time: compat_rfc3339(transaction.created_at_millis),
+        update_time: compat_rfc3339(transaction.updated_at_millis),
+        gid: transaction.gid.clone(),
+        trans_type: compat_kind_name(transaction.kind).to_owned(),
+        status: compat_status_name(transaction.status).to_owned(),
+        protocol: transaction
+            .metadata
+            .get("dtm.protocol")
+            .cloned()
+            .unwrap_or_else(|| "http".to_owned()),
+        finish_time: terminal_time,
+        rollback_time: matches!(
+            transaction.status,
+            TransactionStatus::Aborted | TransactionStatus::Failed
+        )
+        .then(|| compat_rfc3339(transaction.updated_at_millis)),
+        result: transaction
+            .metadata
+            .get("dtm.workflow.result")
+            .cloned()
+            .unwrap_or_default(),
+        rollback_reason: transaction
+            .metadata
+            .get("rollback_reason")
+            .cloned()
+            .unwrap_or_default(),
+        options: options.to_string(),
+        custom_data: transaction
+            .metadata
+            .get("dtm.custom_data")
+            .cloned()
+            .unwrap_or_default(),
+        query_prepared: transaction
+            .metadata
+            .get("dtm.query_prepared")
+            .cloned()
+            .unwrap_or_default(),
+        next_cron_interval: retry_interval,
+        next_cron_time: next_retry_millis.map(compat_rfc3339),
+        timeout_to_fail,
+        request_timeout,
+        retry_interval,
+        wait_result: transaction.options.wait_result,
+        branch_headers,
+        concurrent: transaction.options.concurrent,
+        retry_limit: transaction.options.retry_limit,
+    }
+}
+
+fn compat_options_json(
+    transaction: &Transaction,
+    timeout_to_fail: Option<u64>,
+    request_timeout: Option<u64>,
+    retry_interval: Option<u64>,
+    branch_headers: &BTreeMap<String, String>,
+) -> String {
+    let mut options = serde_json::Map::new();
+    if transaction.options.wait_result {
+        options.insert("wait_result".to_owned(), serde_json::Value::Bool(true));
+    }
+    for (name, value) in [
+        ("timeout_to_fail", timeout_to_fail),
+        ("request_timeout", request_timeout),
+        ("retry_interval", retry_interval),
+        (
+            "retry_limit",
+            transaction.options.retry_limit.map(u64::from),
+        ),
+    ] {
+        if let Some(value) = value {
+            options.insert(name.to_owned(), serde_json::Value::from(value));
+        }
+    }
+    if !branch_headers.is_empty() {
+        options.insert(
+            "branch_headers".to_owned(),
+            serde_json::to_value(branch_headers).unwrap_or_default(),
+        );
+    }
+    options.insert(
+        "concurrent".to_owned(),
+        serde_json::Value::Bool(transaction.options.concurrent),
+    );
+    serde_json::Value::Object(options).to_string()
+}
+
+fn compat_branch_transactions(transaction: &Transaction) -> Vec<CompatBranchTransaction> {
+    if transaction.kind == TransactionKind::Workflow {
+        return transaction
+            .workflow_progresses
+            .iter()
+            .map(|progress| CompatBranchTransaction {
+                id: 0,
+                create_time: compat_rfc3339(transaction.created_at_millis),
+                update_time: compat_rfc3339(transaction.updated_at_millis),
+                gid: transaction.gid.clone(),
+                url: String::new(),
+                bin_data: BASE64_STANDARD.encode(&progress.data),
+                branch_id: progress.branch_id.clone(),
+                op: progress.operation.clone(),
+                status: workflow_progress_status_name(progress.status).to_owned(),
+                finish_time: Some(compat_rfc3339(transaction.updated_at_millis)),
+                rollback_time: None,
+            })
+            .collect();
+    }
+
+    transaction
+        .branches
+        .iter()
+        .flat_map(|branch| compat_branch_operations(transaction.kind, branch))
+        .map(|(branch, op, url)| {
+            let status = compat_branch_status(transaction.status, branch.status, op);
+            let terminal = matches!(status, "succeed" | "failed")
+                .then(|| compat_rfc3339(transaction.updated_at_millis));
+            CompatBranchTransaction {
+                id: 0,
+                create_time: compat_rfc3339(transaction.created_at_millis),
+                update_time: compat_rfc3339(transaction.updated_at_millis),
+                gid: transaction.gid.clone(),
+                url: url.to_owned(),
+                bin_data: BASE64_STANDARD
+                    .encode(serde_json::to_vec(&branch.payload).unwrap_or_default()),
+                branch_id: branch.id.clone(),
+                op: op.to_owned(),
+                status: status.to_owned(),
+                finish_time: terminal.clone(),
+                rollback_time: matches!(op, "compensate" | "cancel" | "rollback")
+                    .then_some(terminal)
+                    .flatten(),
+            }
+        })
+        .collect()
+}
+
+fn compat_branch_operations(
+    kind: TransactionKind,
+    branch: &Branch,
+) -> Vec<(&Branch, &'static str, &str)> {
+    match kind {
+        TransactionKind::Saga => vec![
+            (branch, "compensate", branch.compensate.as_deref().unwrap_or_default()),
+            (branch, "action", branch.action.as_str()),
+        ],
+        TransactionKind::Tcc => vec![
+            (branch, "cancel", branch.cancel.as_deref().unwrap_or_default()),
+            (branch, "confirm", branch.confirm.as_deref().unwrap_or_default()),
+        ],
+        TransactionKind::Xa => vec![
+            (branch, "rollback", branch.cancel.as_deref().unwrap_or_default()),
+            (branch, "commit", branch.confirm.as_deref().unwrap_or_default()),
+        ],
+        TransactionKind::Message => vec![(branch, "action", branch.action.as_str())],
+        TransactionKind::Workflow => Vec::new(),
+    }
+}
+
+fn compat_branch_status(
+    transaction_status: TransactionStatus,
+    branch_status: BranchStatus,
+    op: &str,
+) -> &'static str {
+    if branch_status == BranchStatus::Failed {
+        return "failed";
+    }
+    let commit_operation = matches!(op, "action" | "confirm" | "commit");
+    let rollback_operation = matches!(op, "compensate" | "cancel" | "rollback");
+    let successful_operation = if matches!(
+        transaction_status,
+        TransactionStatus::Aborting | TransactionStatus::Aborted
+    ) {
+        rollback_operation
+    } else {
+        commit_operation
+    };
+    if branch_status == BranchStatus::Succeeded && successful_operation {
+        "succeed"
+    } else {
+        "prepared"
+    }
+}
+
+const fn millis_to_seconds(value: u64) -> u64 {
+    value.saturating_add(999) / 1_000
+}
+
+fn compat_rfc3339(millis: u64) -> String {
+    let seconds = millis / 1_000;
+    let milliseconds = millis % 1_000;
+    let days = (seconds / 86_400) as i64;
+    let seconds_of_day = seconds % 86_400;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096)
+            / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    let hour = seconds_of_day / 3_600;
+    let minute = seconds_of_day % 3_600 / 60;
+    let second = seconds_of_day % 60;
+    if milliseconds == 0 {
+        format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+    } else {
+        format!(
+            "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{milliseconds:03}Z"
+        )
+    }
 }
 
 fn compat_response(value: serde_json::Value) -> HttpResponse {
@@ -1267,7 +1598,7 @@ async fn compat_scan_kv(
     {
         Ok(entries) => compat_response(serde_json::json!({
             "next_position": if entries.len() == limit { (position + limit).to_string() } else { String::new() },
-            "kv": entries,
+            "kv": entries.iter().map(compat_kv_entry).collect::<Vec<_>>(),
             "dtm_result": "SUCCESS"
         })),
         Err(_) => compat_failure("KV scan failed"),
@@ -1293,10 +1624,23 @@ async fn compat_query_kv(
         )
         .await
     {
-        Ok(entries) => compat_response(
-            serde_json::json!({"kv": entries, "dtm_result": "SUCCESS"}),
-        ),
+        Ok(entries) => compat_response(serde_json::json!({
+            "kv": entries.iter().map(compat_kv_entry).collect::<Vec<_>>(),
+            "dtm_result": "SUCCESS"
+        })),
         Err(_) => compat_failure("KV query failed"),
+    }
+}
+
+fn compat_kv_entry(entry: &KvEntry) -> CompatKvEntry {
+    CompatKvEntry {
+        id: 0,
+        create_time: compat_rfc3339(entry.created_at_millis),
+        update_time: compat_rfc3339(entry.updated_at_millis),
+        cat: entry.category.clone(),
+        k: entry.key.clone(),
+        v: entry.value.clone(),
+        version: entry.version,
     }
 }
 
@@ -2625,6 +2969,25 @@ const fn kind_name(kind: TransactionKind) -> &'static str {
     }
 }
 
+const fn compat_kind_name(kind: TransactionKind) -> &'static str {
+    match kind {
+        TransactionKind::Message => "msg",
+        _ => kind_name(kind),
+    }
+}
+
+const fn compat_status_name(status: TransactionStatus) -> &'static str {
+    match status {
+        TransactionStatus::Submitted
+        | TransactionStatus::Trying
+        | TransactionStatus::Succeeding => "submitted",
+        TransactionStatus::Prepared => "prepared",
+        TransactionStatus::Succeeded => "succeed",
+        TransactionStatus::Aborting => "aborting",
+        TransactionStatus::Aborted | TransactionStatus::Failed => "failed",
+    }
+}
+
 const fn status_name(status: TransactionStatus) -> &'static str {
     match status {
         TransactionStatus::Submitted => "submitted",
@@ -3257,6 +3620,58 @@ mod tests {
             },
         )
         .is_err());
+    }
+
+    #[test]
+    fn compat_query_uses_upstream_global_and_branch_wire_shapes() {
+        let mut branch = Branch::message(
+            "01",
+            "http://events/publish",
+            serde_json::json!({"order_id": 7}),
+        );
+        branch.status = BranchStatus::Succeeded;
+        let mut transaction = Transaction::message("message-1", vec![branch]);
+        transaction.status = TransactionStatus::Succeeded;
+        transaction.created_at_millis = 0;
+        transaction.updated_at_millis = 1_234;
+        transaction.options.concurrent = true;
+
+        let global = serde_json::to_value(compat_global_transaction(&transaction))
+            .expect("compat global transaction");
+        assert_eq!(global["trans_type"], "msg");
+        assert_eq!(global["status"], "succeed");
+        assert_eq!(global["create_time"], "1970-01-01T00:00:00Z");
+        assert_eq!(global["update_time"], "1970-01-01T00:00:01.234Z");
+        assert_eq!(global["concurrent"], true);
+        assert!(global.get("kind").is_none());
+        assert!(global.get("created_at_millis").is_none());
+        assert!(global.get("branches").is_none());
+
+        let branches = serde_json::to_value(compat_branch_transactions(&transaction))
+            .expect("compat branch transactions");
+        assert_eq!(branches[0]["branch_id"], "01");
+        assert_eq!(branches[0]["op"], "action");
+        assert_eq!(branches[0]["status"], "succeed");
+        assert_eq!(branches[0]["url"], "http://events/publish");
+        assert_eq!(branches[0]["bin_data"], "eyJvcmRlcl9pZCI6N30=");
+        assert!(branches[0].get("payload").is_none());
+    }
+
+    #[test]
+    fn compat_all_accepts_upstream_message_and_success_names() {
+        let mut transaction = Transaction::message("message-2", Vec::new());
+        transaction.status = TransactionStatus::Succeeded;
+        let response = build_compat_all_response(
+            vec![transaction],
+            CompatQuery {
+                trans_type: Some("msg".to_owned()),
+                status: Some("succeed".to_owned()),
+                ..CompatQuery::default()
+            },
+        )
+        .expect("upstream filters");
+        assert_eq!(response["transactions"][0]["trans_type"], "msg");
+        assert_eq!(response["transactions"][0]["status"], "succeed");
     }
 
     #[test]

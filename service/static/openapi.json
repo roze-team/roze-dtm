@@ -82,7 +82,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CompatPayload"
+                  "$ref": "#/components/schemas/CompatAllResponse"
                 }
               }
             }
@@ -275,7 +275,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CompatPayload"
+                  "$ref": "#/components/schemas/CompatQueryResponse"
                 }
               }
             }
@@ -306,7 +306,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CompatPayload"
+                  "$ref": "#/components/schemas/CompatKvResponse"
                 }
               }
             }
@@ -510,7 +510,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CompatPayload"
+                  "$ref": "#/components/schemas/CompatKvScanResponse"
                 }
               }
             }
@@ -2758,6 +2758,308 @@
               "null"
             ],
             "pattern": "^[0-9a-f]{40}$"
+          }
+        }
+      },
+      "CompatGlobalTransaction": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "create_time",
+          "update_time",
+          "gid",
+          "trans_type",
+          "status",
+          "protocol",
+          "options",
+          "concurrent"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "create_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "update_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "gid": {
+            "type": "string"
+          },
+          "trans_type": {
+            "type": "string",
+            "enum": [
+              "tcc",
+              "saga",
+              "workflow",
+              "msg",
+              "xa"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "prepared",
+              "submitted",
+              "succeed",
+              "aborting",
+              "failed"
+            ]
+          },
+          "protocol": {
+            "type": "string"
+          },
+          "finish_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "rollback_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "result": {
+            "type": "string"
+          },
+          "rollback_reason": {
+            "type": "string"
+          },
+          "options": {
+            "type": "string",
+            "contentMediaType": "application/json"
+          },
+          "custom_data": {
+            "type": "string"
+          },
+          "query_prepared": {
+            "type": "string"
+          },
+          "next_cron_interval": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "next_cron_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "timeout_to_fail": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "request_timeout": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "retry_interval": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "wait_result": {
+            "type": "boolean"
+          },
+          "branch_headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "concurrent": {
+            "type": "boolean"
+          },
+          "retry_limit": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "CompatBranchTransaction": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "create_time",
+          "update_time",
+          "gid",
+          "branch_id",
+          "op",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "create_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "update_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "gid": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "bin_data": {
+            "type": "string",
+            "contentEncoding": "base64"
+          },
+          "branch_id": {
+            "type": "string"
+          },
+          "op": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "prepared",
+              "succeed",
+              "failed"
+            ]
+          },
+          "finish_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "rollback_time": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CompatKvEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "create_time",
+          "update_time",
+          "cat",
+          "k",
+          "v",
+          "version"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "create_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "update_time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "cat": {
+            "type": "string"
+          },
+          "k": {
+            "type": "string"
+          },
+          "v": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "CompatQueryResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "transaction",
+          "branches",
+          "dtm_result"
+        ],
+        "properties": {
+          "transaction": {
+            "$ref": "#/components/schemas/CompatGlobalTransaction"
+          },
+          "branches": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompatBranchTransaction"
+            }
+          },
+          "dtm_result": {
+            "const": "SUCCESS"
+          }
+        }
+      },
+      "CompatAllResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "transactions",
+          "next_position",
+          "dtm_result"
+        ],
+        "properties": {
+          "transactions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompatGlobalTransaction"
+            }
+          },
+          "next_position": {
+            "type": "string"
+          },
+          "dtm_result": {
+            "const": "SUCCESS"
+          }
+        }
+      },
+      "CompatKvResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kv",
+          "dtm_result"
+        ],
+        "properties": {
+          "kv": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompatKvEntry"
+            }
+          },
+          "dtm_result": {
+            "const": "SUCCESS"
+          }
+        }
+      },
+      "CompatKvScanResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kv",
+          "next_position",
+          "dtm_result"
+        ],
+        "properties": {
+          "kv": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompatKvEntry"
+            }
+          },
+          "next_position": {
+            "type": "string"
+          },
+          "dtm_result": {
+            "const": "SUCCESS"
           }
         }
       },
