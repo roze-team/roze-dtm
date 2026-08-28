@@ -37,6 +37,8 @@
     .button { padding:7px 12px; font-weight:600; }
     .button:hover { border-color:#b6c9eb; color:var(--primary); background:var(--primary-soft); }
     .button.primary { border-color:var(--primary); color:#fff; background:var(--primary); }
+    .button.danger { border-color:#e2aab2; color:var(--danger); background:var(--danger-soft); }
+    .button.small { min-height:29px; padding:4px 8px; font-size:11px; }
     .button:disabled { opacity:.45; cursor:not-allowed; }
     #token { width:min(300px,32vw); }
     .status { display:flex; align-items:center; gap:7px; color:var(--muted); font-size:11px; }
@@ -75,6 +77,7 @@
     td { font-size:12px; font-variant-numeric:tabular-nums; }
     tbody tr:hover { background:#f8fbff; }
     td.gid { max-width:230px; overflow:hidden; color:#315f9f; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; text-overflow:ellipsis; }
+    .row-actions { display:flex; gap:6px; }
     .badge { display:inline-flex; align-items:center; padding:2px 7px; border:1px solid #dbe4ef; border-radius:5px; color:#496993; background:#f3f7fc; font-size:11px; font-weight:600; }
     .badge.succeeded,.badge.success { color:var(--success); border-color:#c9e9da; background:var(--success-soft); }
     .badge.failed,.badge.aborted { color:var(--danger); border-color:#efcfd5; background:var(--danger-soft); }
@@ -94,6 +97,14 @@
     .event-meta { display:flex; flex-wrap:wrap; gap:5px 8px; margin-top:4px; color:var(--muted); font-size:10px; }
     .event-resource { margin-top:4px; overflow:hidden; color:#315f9f; font:10px ui-monospace,SFMono-Regular,Consolas,monospace; text-overflow:ellipsis; white-space:nowrap; }
     .security-note { margin:12px 15px 15px; padding:10px 11px; border:1px solid var(--line); border-radius:7px; color:var(--muted); background:var(--soft); font-size:10px; }
+    .modal-backdrop { position:fixed; inset:0; z-index:30; display:none; place-items:center; padding:18px; background:rgb(15 23 42 / 48%); }
+    .modal-backdrop.visible { display:grid; }
+    .modal { width:min(480px,100%); padding:20px; border:1px solid var(--line); border-radius:10px; background:var(--surface); box-shadow:0 24px 70px rgb(15 23 42 / 24%); }
+    .modal h2 { margin:0; font-size:17px; }
+    .modal p { margin:8px 0; color:var(--muted); }
+    .modal-resource { padding:9px 10px; overflow:hidden; border:1px solid var(--line); border-radius:6px; background:var(--soft); font:12px ui-monospace,SFMono-Regular,Consolas,monospace; text-overflow:ellipsis; white-space:nowrap; }
+    .modal-warning { color:var(--danger) !important; font-size:12px; }
+    .modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; }
     @media (prefers-color-scheme:dark) { :root { color-scheme:dark; --canvas:#0f141b; --surface:#171d26; --soft:#1c2430; --line:#293343; --text:#edf2f8; --muted:#97a5b8; --primary-soft:#202d46; --success-soft:#173329; --warning-soft:#342b18; --danger-soft:#382129; --shadow:none; } .topbar { background:rgb(23 29 38 / 92%); } th { color:#aab6c6; } tbody tr:hover { background:#1b2532; } td.gid,.event-resource { color:#8fb9f5; } }
     @media (max-width:1160px) { .cards { grid-template-columns:repeat(2,1fr); } .grid { grid-template-columns:1fr; } .timeline { max-height:420px; } }
     @media (max-width:780px) { .app { grid-template-columns:1fr; } .sidebar { position:static; width:100%; height:auto; flex-direction:row; align-items:center; overflow:auto; padding:8px 10px; } .brand { min-width:190px; padding:0 12px 0 0; border:0; } .nav-label,.sidebar-note { display:none; } .nav-link { flex:0 0 auto; } .topbar { position:static; align-items:stretch; flex-direction:column; padding:12px 14px; } .connection { width:100%; } #token { flex:1; width:auto; } .content { padding:18px 12px; } .toolbar { grid-template-columns:1fr 1fr; } .toolbar input { grid-column:1/-1; } }
@@ -108,7 +119,7 @@
       <a class="nav-link active" href="#overview"><span class="nav-icon">⌂</span>概览</a>
       <a class="nav-link" href="#transactions"><span class="nav-icon">⇄</span>事务</a>
       <a class="nav-link" href="#audit"><span class="nav-icon">◎</span>审计时间线</a>
-      <div class="sidebar-note"><strong>只读控制面</strong>敏感载荷、分支地址、Header、metadata 与错误正文不会进入 Dashboard。</div>
+      <div class="sidebar-note"><strong>受控管理面</strong>管理动作要求 Bearer 令牌与二次确认；敏感载荷、分支地址、Header、metadata 与错误正文不会进入 Dashboard。</div>
     </aside>
     <div class="workspace">
       <header class="topbar">
@@ -135,7 +146,7 @@
           <section id="transactions" class="panel">
             <div class="panel-head"><div><div class="panel-title">事务资源</div><div class="panel-subtitle">精确 GID 查询与有界分页；结果按存储快照返回。</div></div><button id="refresh" class="button" type="button">刷新</button></div>
             <div class="toolbar"><input id="gid" type="search" maxlength="128" placeholder="按 GID 精确查询" aria-label="GID"><select id="kind" aria-label="事务类型"><option value="">全部类型</option><option>tcc</option><option>saga</option><option>workflow</option><option>message</option><option>xa</option></select><select id="status" aria-label="事务状态"><option value="">全部状态</option><option>submitted</option><option>trying</option><option>prepared</option><option>succeeding</option><option>succeeded</option><option>aborting</option><option>aborted</option><option>failed</option></select><button id="apply-filter" class="button" type="button">应用</button></div>
-            <div class="table-wrap"><table><thead><tr><th>GID</th><th>类型</th><th>状态</th><th>分支进度</th><th>失败</th><th>尝试</th><th>下次重试</th><th>更新时间</th></tr></thead><tbody id="rows"></tbody></table><div id="empty" class="empty">输入控制令牌后连接</div></div>
+            <div class="table-wrap"><table><thead><tr><th>GID</th><th>类型</th><th>状态</th><th>分支进度</th><th>失败</th><th>尝试</th><th>下次重试</th><th>更新时间</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div id="empty" class="empty">输入控制令牌后连接</div></div>
             <div class="pager"><span id="page-text">尚未加载</span><div class="pager-actions"><button id="previous" class="button" type="button" disabled>上一页</button><button id="next" class="button" type="button" disabled>下一页</button></div></div>
           </section>
           <aside id="audit" class="panel">
@@ -147,14 +158,24 @@
       </main>
     </div>
   </div>
+  <div id="action-modal" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="action-title">
+    <div class="modal">
+      <h2 id="action-title">确认管理操作</h2>
+      <p id="action-description"></p>
+      <div id="action-gid" class="modal-resource"></div>
+      <p id="action-warning" class="modal-warning"></p>
+      <div class="modal-actions"><button id="action-cancel" class="button" type="button">取消</button><button id="action-confirm" class="button danger" type="button">确认执行</button></div>
+    </div>
+  </div>
   <script>
     (() => {
       'use strict';
       const $ = (id) => document.getElementById(id);
-      const state = { offset: 0, limit: 50, total: 0, loading: false };
+      const state = { offset: 0, limit: 50, total: 0, loading: false, actionLoading: false, pendingAction: null };
       const number = new Intl.NumberFormat('zh-CN');
       const date = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'short', timeStyle: 'medium' });
       const statusLabels = { submitted:'已提交', trying:'执行中', prepared:'已准备', succeeding:'提交中', succeeded:'已成功', aborting:'中止中', aborted:'已中止', failed:'失败' };
+      const actionLabels = { 'reset-retry':'立即重试', 'force-stop':'强制停止' };
       function setText(id, value) { $(id).textContent = value; }
       function showError(message) { $('error').textContent = message; $('error').classList.toggle('visible', Boolean(message)); }
       function setConnection(kind, text) { $('dot').className = `status-dot ${kind || ''}`; setText('connection-text', text); }
@@ -164,7 +185,8 @@
         const row=document.createElement('tr'); const gid=cell(item.gid,'gid'); gid.title=item.gid; row.append(gid,cell(item.kind.toUpperCase()));
         const status=document.createElement('td'); const badge=document.createElement('span'); badge.className=`badge ${item.status}`; badge.textContent=statusLabels[item.status]||item.status; status.append(badge); row.append(status);
         const progressCell=document.createElement('td'); const progress=document.createElement('div'); progress.className='progress'; const bar=document.createElement('span'); const ratio=item.branch_count?item.completed_branch_count/item.branch_count:(item.terminal?1:0); bar.style.width=`${Math.max(0,Math.min(100,ratio*100))}%`; progress.title=`${item.completed_branch_count}/${item.branch_count}`; progress.append(bar); progressCell.append(progress);
-        row.append(progressCell,cell(number.format(item.failed_branch_count)),cell(number.format(item.total_attempts)),cell(formatTime(item.next_retry_millis)),cell(formatTime(item.updated_at_millis))); return row;
+        row.append(progressCell,cell(number.format(item.failed_branch_count)),cell(number.format(item.total_attempts)),cell(formatTime(item.next_retry_millis)),cell(formatTime(item.updated_at_millis)));
+        const actions=document.createElement('td'); const group=document.createElement('div'); group.className='row-actions'; for(const action of item.available_actions||[]){ const button=document.createElement('button'); button.type='button'; button.className=`button small ${action==='force-stop'?'danger':''}`; button.textContent=actionLabels[action]||action; button.addEventListener('click',()=>openAction(item.gid,action)); group.append(button); } if(!group.childElementCount){ const muted=document.createElement('span'); muted.className='snapshot-time'; muted.textContent='—'; group.append(muted); } actions.append(group); row.append(actions); return row;
       }
       function renderAudit(events) {
         if(!events.length){ const empty=document.createElement('div'); empty.className='empty'; empty.textContent='当前进程还没有控制审计事件'; $('timeline').replaceChildren(empty); return; }
@@ -183,7 +205,11 @@
         finally { state.loading=false; $('refresh').disabled=false; $('apply-filter').disabled=false; }
       }
       function resetAndLoad(){ state.offset=0; load(); }
+      function openAction(gid,action){ if(!actionLabels[action]||state.actionLoading)return; state.pendingAction={gid,action}; setText('action-title',actionLabels[action]); setText('action-gid',gid); setText('action-description',action==='reset-retry'?'将失败或补偿中的分支重置为立即可恢复。':'将事务永久标记为失败并停止自动恢复。'); setText('action-warning',action==='force-stop'?'该操作不可由协调器自动撤销，请先确认业务资源状态。':'操作只调整恢复调度，不会绕过分支幂等屏障。'); $('action-confirm').className=`button ${action==='force-stop'?'danger':'primary'}`; $('action-modal').classList.add('visible'); $('action-confirm').focus(); }
+      function closeAction(){ if(state.actionLoading)return; state.pendingAction=null; $('action-modal').classList.remove('visible'); }
+      async function executeAction(){ const pending=state.pendingAction; if(!pending||state.actionLoading)return; state.actionLoading=true; $('action-confirm').disabled=true; $('action-cancel').disabled=true; showError(''); try { const headers={Accept:'application/json'}; const token=$('token').value; if(token) headers.Authorization=`Bearer ${token}`; const response=await fetch(`/v1/transactions/${encodeURIComponent(pending.gid)}/${pending.action}`,{method:'POST',headers,cache:'no-store',credentials:'same-origin'}); const envelope=await response.json().catch(()=>null); if(!response.ok||!envelope||envelope.code!==0) throw new Error(response.status===401?'控制令牌无效':(envelope&&envelope.message)||`操作失败 (${response.status})`); state.pendingAction=null; $('action-modal').classList.remove('visible'); setConnection('ok',`${actionLabels[pending.action]}成功`); await load(); } catch(error){ showError(error instanceof Error?error.message:'管理操作失败'); setConnection('error','操作失败'); } finally { state.actionLoading=false; $('action-confirm').disabled=false; $('action-cancel').disabled=false; } }
       $('connect').addEventListener('click',resetAndLoad); $('refresh').addEventListener('click',load); $('apply-filter').addEventListener('click',resetAndLoad); $('token').addEventListener('keydown',(event)=>{if(event.key==='Enter')resetAndLoad();}); $('gid').addEventListener('keydown',(event)=>{if(event.key==='Enter')resetAndLoad();}); for(const id of ['kind','status']) $(id).addEventListener('change',resetAndLoad); $('previous').addEventListener('click',()=>{state.offset=Math.max(0,state.offset-state.limit);load();}); $('next').addEventListener('click',()=>{if(state.offset+state.limit<state.total){state.offset+=state.limit;load();}});
+      $('action-cancel').addEventListener('click',closeAction); $('action-confirm').addEventListener('click',executeAction); $('action-modal').addEventListener('click',(event)=>{if(event.target===$('action-modal'))closeAction();}); document.addEventListener('keydown',(event)=>{if(event.key==='Escape'&&$('action-modal').classList.contains('visible'))closeAction();});
     })();
   </script>
 </body>

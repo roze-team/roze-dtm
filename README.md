@@ -96,11 +96,11 @@ ROZE_DTM_RELEASE_REVISION=$(git rev-parse HEAD) docker compose -f compose.redis.
 
 ## 管理 Dashboard
 
-浏览器访问 `http://127.0.0.1:8090/dashboard` 可打开只读事务 Dashboard。页面视觉与交互参考 Roze Admin 的 Workspace/Resource Page：Admin 侧栏、工作区指标卡、紧凑筛选区、状态标签、事务进度、XA 人工对账计数、分页表格和审计时间线。页面通过 `GET /v1/dashboard` 获取脱敏快照，必须输入控制令牌；令牌只保存在当前页面内存，不写入 URL 或浏览器存储。`GET /v1/xa/reconciliation` 提供等待全局决策、phase-2 进行中和需要人工对账的 XA 安全摘要。
+浏览器访问 `http://127.0.0.1:8090/dashboard` 可打开事务管理 Dashboard。页面视觉与交互参考 Roze Admin 的 Workspace/Resource Page：Admin 侧栏、工作区指标卡、紧凑筛选区、状态标签、事务进度、XA 人工对账计数、分页表格、审计时间线，以及由服务端按事务状态声明的管理动作。页面通过 `GET /v1/dashboard` 获取脱敏快照，并可在二次确认后调用 `reset-retry` 或 `force-stop`；所有数据和动作都必须携带控制令牌。令牌只保存在当前页面内存，不写入 URL 或浏览器存储。`GET /v1/xa/reconciliation` 提供等待全局决策、phase-2 进行中和需要人工对账的 XA 安全摘要。
 
-`GET /openapi.json` 公开完整 OpenAPI 3.1 合同。该文件由 `scripts/generate-openapi.py` 确定性生成，`scripts/validate-openapi.py` 会与当前 Router 做逐路径覆盖检查并验证 schema 引用及 operationId 唯一性。
+`GET /openapi.json` 公开完整 OpenAPI 3.1 合同。该文件由 `scripts/generate-openapi.py` 确定性生成，`scripts/validate-openapi.py` 会与当前 Router 做逐路径覆盖检查并递归验证 schema 引用及 operationId 唯一性。`scripts/validate-dashboard.py` 独立检查 Dashboard 元素 id、无外部资源、CSP、令牌不落浏览器存储，以及受控管理动作接线。
 
-Dashboard 数据不包含分支 URL、请求载荷、Header、metadata、Workflow 二进制数据或依赖错误，只返回 GID、类型、状态、分支计数、尝试次数和时间字段。审计时间线是容量 200、最新优先的进程内环形历史，每次快照最多返回 50 条脱敏控制事件；它不替代持久化审计 sink，服务重启后会清空。`/dashboard` 只提供静态页面壳，受保护的数据接口仍应仅暴露在管理网络或服务网格内。
+Dashboard 数据不包含分支 URL、请求载荷、Header、metadata、Workflow 二进制数据或依赖错误，只返回 GID、类型、状态、分支计数、尝试次数、时间字段和服务端计算的允许动作。终态事务不暴露管理动作；`reset-retry` 仅在存在失败/运行/补偿分支或 callback Workflow 时显示，业务延迟尚未到期的 Message 不会错误显示“立即重试”；`force-stop` 仅对非终态事务显示并带不可自动撤销警告。审计时间线是容量 200、最新优先的进程内环形历史，每次快照最多返回 50 条脱敏控制事件；它不替代持久化审计 sink，服务重启后会清空。`/dashboard` 只提供静态页面壳，受保护的数据与变更接口仍应仅暴露在管理网络或服务网格内。
 
 ## 存储后端
 

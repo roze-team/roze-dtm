@@ -489,6 +489,7 @@ struct DashboardTransactionRow {
     timeout_millis: Option<u64>,
     terminal: bool,
     xa_reconciliation_state: Option<String>,
+    available_actions: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -2365,6 +2366,7 @@ impl From<Transaction> for DashboardTransactionRow {
             .sum();
         let next_retry_millis = dashboard_next_retry_millis(&transaction);
         let xa_reconciliation_state = xa_reconciliation_state(&transaction).map(str::to_owned);
+        let available_actions = dashboard_available_actions(&transaction);
         Self {
             gid: transaction.gid,
             kind: kind_name(transaction.kind).to_owned(),
@@ -2379,8 +2381,28 @@ impl From<Transaction> for DashboardTransactionRow {
             timeout_millis: transaction.timeout_millis,
             terminal: transaction.status.is_terminal(),
             xa_reconciliation_state,
+            available_actions,
         }
     }
+}
+
+fn dashboard_available_actions(transaction: &Transaction) -> Vec<String> {
+    if transaction.status.is_terminal() {
+        return Vec::new();
+    }
+    let mut actions = Vec::with_capacity(2);
+    if transaction.branches.iter().any(|branch| {
+            matches!(
+                branch.status,
+                BranchStatus::Failed | BranchStatus::Running | BranchStatus::Compensating
+            )
+        })
+        || is_callback_workflow(transaction)
+    {
+        actions.push("reset-retry".to_owned());
+    }
+    actions.push("force-stop".to_owned());
+    actions
 }
 
 fn dashboard_next_retry_millis(transaction: &Transaction) -> Option<u64> {
@@ -3270,6 +3292,10 @@ mod tests {
         assert_eq!(snapshot.summary.retry_scheduled, 1);
         assert_eq!(snapshot.transactions.items[0].failed_branch_count, 1);
         assert_eq!(snapshot.transactions.items[0].total_attempts, 3);
+        assert_eq!(
+            snapshot.transactions.items[0].available_actions,
+            vec!["reset-retry".to_owned(), "force-stop".to_owned()]
+        );
         assert_eq!(snapshot.audit.limit, DASHBOARD_AUDIT_LIMIT);
         assert_eq!(snapshot.audit.capacity, DASHBOARD_AUDIT_CAPACITY);
         assert!(snapshot.audit.items.is_empty());
@@ -3310,6 +3336,10 @@ mod tests {
 
         assert_eq!(snapshot.summary.retry_scheduled, 1);
         assert_eq!(snapshot.transactions.items[0].next_retry_millis, Some(expected));
+        assert_eq!(
+            snapshot.transactions.items[0].available_actions,
+            vec!["force-stop".to_owned()]
+        );
     }
 
     #[test]
@@ -3332,6 +3362,24 @@ mod tests {
             Vec::new(),
         )
         .is_err());
+    }
+
+    #[test]
+    fn dashboard_terminal_transactions_expose_no_management_actions() {
+        let mut transaction = Transaction::message(
+            "dashboard-terminal-message",
+            vec![Branch::message(
+                "publish",
+                "http://events/publish",
+                serde_json::json!({}),
+            )],
+        );
+        transaction.status = TransactionStatus::Succeeded;
+
+        let row = DashboardTransactionRow::from(transaction);
+
+        assert!(row.terminal);
+        assert!(row.available_actions.is_empty());
     }
 
     #[test]

@@ -82,6 +82,7 @@ export interface DashboardTransactionRow {
   completed_branch_count: number; failed_branch_count: number; total_attempts: number;
   next_retry_millis: number | null; created_at_millis: number; updated_at_millis: number;
   timeout_millis: number | null; terminal: boolean; xa_reconciliation_state: string | null;
+  available_actions: Array<"reset-retry" | "force-stop">;
 }
 
 export interface DashboardAuditEvent {

@@ -18,12 +18,11 @@ assert routes == paths, {
 }
 
 schemas = document["components"]["schemas"]
-references: list[str] = []
+references = re.findall(
+    r"#/components/schemas/([^\"/]+)", json.dumps(document)
+)
 operation_ids: list[str] = []
 for path_item in document["paths"].values():
-    references.extend(
-        re.findall(r"#/components/schemas/([^\"/]+)", json.dumps(path_item))
-    )
     operation_ids.extend(
         operation["operationId"]
         for operation in path_item.values()
@@ -40,6 +39,13 @@ assert not missing_references, {"missing_schema_references": missing_references}
 assert len(operation_ids) == len(set(operation_ids)), "operationId values must be unique"
 assert document["openapi"] == "3.1.0"
 assert schemas["JsonValue"] == {}, "JsonValue must remain unrestricted"
+assert schemas["DashboardSnapshot"]["additionalProperties"] is False
+assert schemas["DashboardSnapshot"]["properties"]["transactions"] == {
+    "$ref": "#/components/schemas/DashboardTransactionPage"
+}
+assert schemas["DashboardTransactionRow"]["properties"]["available_actions"]["items"][
+    "enum"
+] == ["reset-retry", "force-stop"]
 assert all(tag.get("description") for tag in document["tags"])
 assert len(paths) == 54
 print(

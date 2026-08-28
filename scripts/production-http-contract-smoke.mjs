@@ -55,6 +55,7 @@ await check("contract:openapi", async () => {
   assert(Object.keys(document.paths ?? {}).length === 54, "OpenAPI path count is not 54");
   assert(document.paths["/api/json-rpc"], "OpenAPI omits JSON-RPC");
   assert(document.paths["/v1/dashboard"], "OpenAPI omits Dashboard API");
+  assert(document.components?.schemas?.DashboardTransactionRow?.properties?.available_actions?.items?.enum?.join(",") === "reset-retry,force-stop", "OpenAPI omits Dashboard management action contract");
   return "OpenAPI 3.1, 54 paths";
 });
 
@@ -78,6 +79,14 @@ await check("management:dashboard-redaction", async () => {
   const leaked = findForbiddenKeys(payload.data, forbidden);
   assert(leaked.length === 0, `Dashboard exposed forbidden keys: ${leaked.join(", ")}`);
   assert(JSON.stringify(payload).indexOf(token) === -1, "Dashboard response exposed the control token");
+  const rows = payload.data?.transactions?.items;
+  assert(Array.isArray(rows), "Dashboard transaction rows are missing");
+  for (const row of rows) {
+    assert(Array.isArray(row.available_actions), "Dashboard row omits available_actions");
+    assert(row.available_actions.every((action) => action === "reset-retry" || action === "force-stop"), "Dashboard row exposes an unknown management action");
+    assert(!row.terminal || row.available_actions.length === 0, "terminal Dashboard row exposes management actions");
+    assert(row.terminal || row.available_actions.includes("force-stop"), "non-terminal Dashboard row omits force-stop");
+  }
   return `rows=${payload.data?.transactions?.items?.length ?? 0}`;
 });
 

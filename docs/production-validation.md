@@ -52,9 +52,11 @@ MySQL 验证必须启用 InnoDB，并覆盖 XA START 之后、分支注册之后
 
 ## Dashboard
 
-`GET /dashboard` 仅提供静态页面，`GET /v1/dashboard` 必须验证 Bearer 控制令牌。生产验收需要覆盖未授权拒绝、筛选与分页边界、空数据、各事务状态、审计历史容量/顺序、窄屏和系统暗色模式，并检查浏览器网络响应中不存在分支 URL、payload、Header、metadata、Workflow 数据、依赖错误或错误正文。控制令牌不得进入 URL、localStorage、sessionStorage、日志或表格 DOM；进程重启后审计时间线清空，不得将它误作持久审计证据。
+`GET /dashboard` 仅提供静态页面，`GET /v1/dashboard` 和所有管理动作必须验证 Bearer 控制令牌。生产验收需要覆盖未授权拒绝、筛选与分页边界、空数据、各事务状态、终态无动作、待恢复事务只显示服务端允许动作、二次确认、执行中锁定、审计历史容量/顺序、窄屏和系统暗色模式，并检查浏览器网络响应中不存在分支 URL、payload、Header、metadata、Workflow 数据、依赖错误或错误正文。控制令牌不得进入 URL、localStorage、sessionStorage、日志或表格 DOM；进程重启后审计时间线清空，不得将它误作持久审计证据。
 
-当前状态：Roze Admin 风格页面、脱敏快照、XA 人工对账指标、有界审计时间线和 `/v1/xa/reconciliation` 源码测试已加入；已用本地静态 HTTP 服务完成桌面/390px 窄屏浏览器渲染、连接失败反馈和控制台错误检查。受当前禁编译要求约束，尚未执行真实 Roze 服务、受保护 Dashboard API、暗色模式或端到端验证，因此状态保持 `inconclusive`。
+不启动服务的合同检查使用 `python scripts/validate-dashboard.py` 与 `python scripts/validate-openapi.py`；前者验证静态页面唯一元素 id、无第三方资源、CSP、令牌不落浏览器存储及管理动作接线，后者递归验证全部 OpenAPI schema 引用并固定 Dashboard 行级动作枚举。它们不能替代真实 Bearer、状态变更和审计端到端验证。
+
+当前状态：Roze Admin 风格页面、脱敏快照、服务端动作声明、`reset-retry`/`force-stop` 二次确认、XA 人工对账指标、有界审计时间线和 `/v1/xa/reconciliation` 源码测试已加入；此前已用本地静态 HTTP 服务完成桌面/390px 窄屏浏览器渲染、连接失败反馈和控制台错误检查。受当前禁编译要求约束，本轮尚未执行真实 Roze 服务、受保护 Dashboard API、管理动作、暗色模式或端到端验证，因此状态保持 `inconclusive`。
 
 ## 生产证据要求
 

@@ -1,6 +1,6 @@
 # Roze DTM Web SDK
 
-`roze-dtm.ts` 和 `roze-dtm.js` 覆盖原生 `/v1` 控制面的五种事务提交、生命周期转换、查询、恢复、统计、Dashboard 与 XA 对账接口。客户端接受可选 Bearer token、`AbortSignal`、附加请求头和自定义 Fetch 实现，并按 Roze 数字响应合同解包 `data`；HTTP 失败或非零业务码抛出 `RozeDtmApiError`。
+`roze-dtm.ts` 和 `roze-dtm.js` 覆盖原生 `/v1` 控制面的五种事务提交、生命周期转换、查询、恢复、统计、Dashboard、Dashboard 行级管理动作与 XA 对账接口。`DashboardTransactionRow.available_actions` 明确列出当前可调用的 `reset-retry` / `force-stop`，客户端对应 `resetRetryTransaction` / `forceStopTransaction`。客户端接受可选 Bearer token、`AbortSignal`、附加请求头和自定义 Fetch 实现，并按 Roze 数字响应合同解包 `data`；HTTP 失败或非零业务码抛出 `RozeDtmApiError`。
 
 ```ts
 import { RozeDtmClient } from "./roze-dtm.js";

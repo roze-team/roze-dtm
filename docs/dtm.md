@@ -75,15 +75,15 @@ Authorization: Bearer <ROZE_DTM_CONTROL_TOKEN>
 - `POST /v1/transactions/{gid}/reset-retry`：立即重新调度失败或补偿中的分支。
 - `POST /v1/recover`：触发一次全局恢复扫描。
 - `GET /v1/stats`：按类型和状态统计事务。
-- `GET /v1/dashboard`：返回只读、分页且脱敏的 Dashboard 快照。
-- `GET /dashboard`：返回参考 Roze Admin Workspace/Resource Page 视觉的静态管理页面；不包含受保护数据。
+- `GET /v1/dashboard`：返回分页、脱敏的 Dashboard 快照，以及按事务状态计算的允许管理动作。
+- `GET /dashboard`：返回参考 Roze Admin Workspace/Resource Page 视觉的静态管理页面；页面本身不包含受保护数据，管理动作要求令牌和二次确认。
 - `GET /openapi.json`：返回覆盖原生、dtm-labs 兼容、管理和运维端点的 OpenAPI 3.1 合同。
 - `GET /healthz`、`GET /startupz`、`GET /readyz`：运行状态探针。
 - `GET /metrics`：Prometheus 指标。
 
 所有业务响应使用 Roze 数字信封：成功 `code: 0`，错误 code 与 HTTP 状态一致。查询参数支持 `gid`、`kind`、`status`、`offset`、`limit`；默认 limit 为 50，最大为 200。
 
-Dashboard API 使用同一组过滤和分页边界，但只返回管理摘要字段。它明确排除分支 Action/Confirm/Cancel/Compensate URL、payload、Header、metadata、Workflow progress data、回滚原因和依赖错误。响应还包含最近 50 条控制审计事件，底层进程内历史固定容量为 200；事件仅含 sequence、时间、稳定事件名、结果、可选 GID 和事务状态，不含 token、错误正文或业务数据。该环形历史用于即时运维态势，不能替代非丢弃持久审计 sink。页面不会持久化控制令牌，也不会加载第三方脚本、字体或图片；部署方仍需在入口层为 `/dashboard` 与 `/v1/dashboard` 配置 TLS、访问来源限制和常规安全响应头。
+Dashboard API 使用同一组过滤和分页边界，但只返回管理摘要字段。它明确排除分支 Action/Confirm/Cancel/Compensate URL、payload、Header、metadata、Workflow progress data、回滚原因和依赖错误。每行 `available_actions` 由服务端根据持久化状态计算：终态为空，存在失败/运行/补偿分支或 callback Workflow 的非终态可 `reset-retry`，所有非终态可 `force-stop`；尚处于业务延迟窗口的 Message 不会暴露无效的立即重试动作。页面不会自行推断或扩大动作范围，并在变更前显示 GID、影响和不可逆提示。响应还包含最近 50 条控制审计事件，底层进程内历史固定容量为 200；事件仅含 sequence、时间、稳定事件名、结果、可选 GID 和事务状态，不含 token、错误正文或业务数据。该环形历史用于即时运维态势，不能替代非丢弃持久审计 sink。页面不会持久化控制令牌，也不会加载第三方脚本、字体或图片；部署方仍需在入口层为 `/dashboard`、`/v1/dashboard` 与管理动作配置 TLS、访问来源限制和常规安全响应头。
 
 ## TCC 请求
 
