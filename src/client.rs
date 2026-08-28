@@ -176,6 +176,27 @@ impl DtmHttpClient {
         decode_callback_workflow(response).await
     }
 
+    pub async fn prepare_named_callback_workflow(
+        &self,
+        gid: &str,
+        query_prepared: &str,
+        workflow_name: &str,
+        data: &[u8],
+    ) -> anyhow::Result<CallbackWorkflowSnapshot> {
+        anyhow::ensure!(
+            !workflow_name.is_empty() && workflow_name.len() <= 128,
+            "callback workflow name must contain 1 to 128 bytes"
+        );
+        anyhow::ensure!(data.len() <= 2 * 1024 * 1024, "callback workflow data exceeds 2 MiB");
+        let custom_data = serde_json::json!({
+            "name": workflow_name,
+            "data": BASE64_STANDARD.encode(data),
+        })
+        .to_string();
+        self.prepare_callback_workflow(gid, query_prepared, &custom_data)
+            .await
+    }
+
     pub async fn record_callback_workflow_progress(
         &self,
         gid: &str,

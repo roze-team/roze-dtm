@@ -222,6 +222,7 @@ fn compat_request(
         retry_limit: positive_u64(options.retry_limit),
         branch_headers: options.branch_headers.into_iter().collect(),
         req_extra: input.req_extra.into_iter().collect(),
+        protocol: crate::CompatProtocol::Grpc,
     })
 }
 
@@ -318,6 +319,7 @@ mod tests {
         assert_eq!(converted.retry_interval, Some(5));
         assert_eq!(converted.branch_headers["x-tenant"], "tenant-a");
         assert_eq!(converted.req_extra["status"], "submitted");
+        assert!(converted.protocol == crate::CompatProtocol::Grpc);
         let transaction = crate::compat_transaction(
             roze_dtm::TransactionKind::Saga,
             &converted,

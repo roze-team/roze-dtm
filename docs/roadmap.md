@@ -15,7 +15,7 @@
 | XA | 部分支持 | 已有 Prepare/Commit/Rollback 与动态分支；资源管理器 SQL 助手和启发式结果待补 |
 | 二阶段消息 | 已支持核心 | Prepared/Dispatch/Abort，并复用 `roze-transaction` Outbox/Inbox 与 `roze-mq` |
 | Topic/KV | 已支持核心 | 通用版本化 KV、订阅增删查、HTTP 兼容端点与 `topic://` 消息分支展开 |
-| Workflow DSL | 已支持核心 | 静态依赖图、恢复和逆序补偿；callback Workflow 复合进度与终态已支持，主动 QueryPrepared 恢复待补 |
+| Workflow DSL | 已支持核心 | 静态依赖图、恢复和逆序补偿；callback Workflow 支持复合进度、终态及 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复，互操作待验证 |
 | Redis 存储 | 待实现 | 需要原子脚本、租约 fencing 和真实故障测试 |
 | SDK | 部分支持 | 已提供 Rust HTTP/gRPC client；其他语言 SDK 待补 |
 | Dashboard | 待实现 | 基于只读查询、统计和审计事件构建，不暴露密钥或分支载荷 |

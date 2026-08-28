@@ -165,6 +165,28 @@ impl DtmGrpcClient {
         .await
     }
 
+    pub async fn prepare_named_callback_workflow(
+        &mut self,
+        context: &Context,
+        gid: impl Into<String>,
+        query_prepared: impl Into<String>,
+        workflow_name: &str,
+        data: &[u8],
+    ) -> anyhow::Result<DtmProgressesReply> {
+        anyhow::ensure!(
+            !workflow_name.is_empty() && workflow_name.len() <= 128,
+            "callback workflow name must contain 1 to 128 bytes"
+        );
+        anyhow::ensure!(data.len() <= 2 * 1024 * 1024, "callback workflow data exceeds 2 MiB");
+        let custom_data = serde_json::json!({
+            "name": workflow_name,
+            "data": BASE64_STANDARD.encode(data),
+        })
+        .to_string();
+        self.query_callback_workflow(context, gid, query_prepared, custom_data)
+            .await
+    }
+
     pub async fn subscribe(
         &mut self,
         context: &Context,

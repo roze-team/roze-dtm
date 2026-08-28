@@ -33,8 +33,9 @@ application:
 
 `allowed_branch_origins` 是所有环境的必填项，只接受精确的 HTTP(S) Origin，例如
 `http://inventory:8080`。不得填写路径、通配符或用户凭据。提交事务时会校验
-Action、Confirm、Cancel 和 Compensate URL；实际分支调用会再次校验，并禁止
-HTTP 重定向，避免通过分支地址或重定向访问未授权的内部端点。
+Action、Confirm、Cancel、Compensate 和 callback `QueryPrepared` URL；实际调用会再次
+校验，并禁止 HTTP 重定向，避免通过分支地址或重定向访问未授权的内部端点。gRPC
+callback 使用对应的 `http://` 或 `https://` origin 加入同一白名单。
 
 生产环境禁止 `store.kind: memory`。持久化后端支持 `sqlite`、`postgres` 和 `mysql`；数据库 URL scheme 必须与 kind 一致，`max_connections` 范围为 1–1000。`control_token` 至少 32 字节；`worker_id` 必须在同一部署中唯一。恢复租约时长至少是恢复周期的两倍。配置文件只保存 `env://` 引用，不保存明文密钥。
 
@@ -146,4 +147,4 @@ Saga 端点只接受 `SagaAction` 分支，并要求补偿地址。
 
 ## 当前边界
 
-已支持内存、SQLite、PostgreSQL 与 MySQL 存储，Saga、TCC、静态及 callback Workflow、二阶段消息和 XA 协调状态机，HTTP 分支调用、超时、重试、分支屏障、关系型数据库恢复租约、版本化 KV、topic 订阅、自动恢复 worker、原生 Roze HTTP/gRPC 控制面和审计事件。Redis 后端、完整 XA 资源管理器、callback Workflow 主动 QueryPrepared 恢复、其他语言 SDK 和管理 Dashboard 仍属于后续扩展；gRPC 适配器仍需完成编译与跨语言互操作验证。
+已支持内存、SQLite、PostgreSQL 与 MySQL 存储，Saga、TCC、静态及 callback Workflow、二阶段消息和 XA 协调状态机，HTTP 分支调用、超时、重试、分支屏障、关系型数据库恢复租约、版本化 KV、topic 订阅、自动恢复 worker、callback Workflow 的 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复、原生 Roze HTTP/gRPC 控制面和审计事件。Redis 后端、完整 XA 资源管理器、其他语言 SDK 和管理 Dashboard 仍属于后续扩展；gRPC 适配器及 callback 恢复仍需完成编译、跨语言互操作和故障注入验证。

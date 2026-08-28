@@ -341,6 +341,26 @@ struct CompatTransactionRequest {
     retry_limit: Option<u64>,
     branch_headers: BTreeMap<String, String>,
     req_extra: BTreeMap<String, String>,
+    #[serde(skip)]
+    protocol: CompatProtocol,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum CompatProtocol {
+    #[default]
+    Http,
+    JsonRpc,
+    Grpc,
+}
+
+impl CompatProtocol {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::JsonRpc => "json-rpc",
+            Self::Grpc => "grpc",
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -1052,6 +1072,15 @@ async fn compat_apply(
             transaction.timeout_millis = Some(seconds.saturating_mul(1_000));
         }
         preserve_compat_metadata(&mut transaction, &request)?;
+        if kind == TransactionKind::Workflow
+            && request
+                .query_prepared
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+        {
+            let callback = transaction.callback_workflow_request()?;
+            state.branch_url_policy.validate_callback(&callback.url)?;
+        }
         if let Some(reason) = request.rollback_reason {
             transaction.metadata.insert("rollback_reason".to_string(), reason);
         }
@@ -1140,6 +1169,10 @@ fn preserve_compat_metadata(
     transaction.metadata.insert(
         "dtm.wait_result".to_owned(),
         request.wait_result.to_string(),
+    );
+    transaction.metadata.insert(
+        "dtm.protocol".to_owned(),
+        request.protocol.as_str().to_owned(),
     );
     for (key, value) in [
         ("dtm.retry_interval", request.retry_interval),
@@ -1285,9 +1318,12 @@ async fn json_rpc(
                 _ => CompatOperation::Abort,
             };
             match serde_json::from_value::<CompatTransactionRequest>(request.params) {
-                Ok(params) => compat_apply(&state, params, operation)
+                Ok(mut params) => {
+                    params.protocol = CompatProtocol::JsonRpc;
+                    compat_apply(&state, params, operation)
                     .await
-                    .map(|_| serde_json::json!({})),
+                    .map(|_| serde_json::json!({}))
+                }
                 Err(error) => Err(error.into()),
             }
         }

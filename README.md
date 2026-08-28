@@ -64,7 +64,7 @@ docker compose up --build
 
 ## Rust 客户端
 
-核心 crate 提供 `roze_dtm::client::DtmHttpClient` 和 `roze_dtm::grpc_client::DtmGrpcClient`。HTTP 客户端支持提交五类事务、逐事务 timeout/retry/Header、callback Workflow、状态转换、事务查询、topic/KV 和兼容 GID；gRPC 客户端覆盖 `dtmgimp.Dtm` 全部方法、提供二进制 Workflow 进度助手并传播 Roze Context。生产环境应配置 Bearer token。
+核心 crate 提供 `roze_dtm::client::DtmHttpClient` 和 `roze_dtm::grpc_client::DtmGrpcClient`。HTTP 客户端支持提交五类事务、逐事务 timeout/retry/Header、callback Workflow、状态转换、事务查询、topic/KV 和兼容 GID；gRPC 客户端覆盖 `dtmgimp.Dtm` 全部方法、提供二进制 Workflow 进度助手并传播 Roze Context。两种客户端均提供 named callback Workflow 助手，按上游 `{name,data}` 合同编码任意二进制数据。恢复 worker 可主动查询 HTTP、JSON-RPC 或 gRPC `QueryPrepared` callback，并持久化有上限的重试调度。生产环境应配置 Bearer token 和 `allowed_branch_origins`。
 
 ## 上游同步
 

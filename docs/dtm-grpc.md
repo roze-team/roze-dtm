@@ -47,4 +47,8 @@ rpc:
 
 `PrepareWorkflow` 创建或查询 Prepared Workflow，并返回已经持久化的进度。`RegisterBranch` 在 Workflow 模式下以 `(gid, branch_id, op)` 为复合身份键保存最终 `succeed/failed` 状态和原始二进制结果；完全相同的重复写入幂等成功，冲突写入被拒绝。Workflow `Submit` 读取 `ReqExtra.status`、`rollback_reason` 和 base64 `result`，以存储后端原子操作写入全局 `succeed/failed` 终态。内存使用写锁，SQLite 使用有限 CAS，PostgreSQL/MySQL 使用 `FOR UPDATE` 行锁。
 
-HTTP 客户端进度数据受 JSON 字符串限制，必须是 UTF-8；任意二进制进度应使用 gRPC 客户端。每项数据和所有进度总量上限均为 2 MiB，最多 1000 个复合进度。callback Workflow 不继承服务端默认事务超时；调用方显式设置 `TimeoutToFail` 时，超时会稳定落为 `failed`。恢复 worker 主动调用 `QueryPrepared` 的 HTTP/gRPC callback 仍待补齐，因此当前 callback Workflow 需要客户端重入驱动恢复，尚不能视为完整的上游故障恢复等价。
+HTTP 客户端进度数据受 JSON 字符串限制，必须是 UTF-8；任意二进制进度应使用 gRPC 客户端。每项数据和所有进度总量上限均为 2 MiB，最多 1000 个复合进度。HTTP 和 gRPC Rust 客户端的 `prepare_named_callback_workflow` 会按上游 `{name,data}` 合同将任意二进制 `data` 编码为 base64。
+
+恢复 worker 会主动调用 `QueryPrepared`：HTTP 使用 `gid`、`trans_type=workflow`、`branch_id=00`、`op` 查询参数并将 `200/409/425` 映射为 completed/failed/ongoing；JSON-RPC 合并相同参数并将 `-32901/-32902` 映射为 failed/ongoing；gRPC 发送 `WorkflowData.Data`，并携带 `dtm-gid`、`dtm-trans_type`、`dtm-branch_id`、`dtm-op`、`dtm-dtm` metadata，将 `ABORTED/FAILED_PRECONDITION` 映射为 failed/ongoing。逐事务 Header 和请求超时同样应用于 callback。callback 返回成功但未通过 Submit 写入终态时仍保持 Prepared，并按有上限的指数退避重试；ongoing 使用固定间隔；所有调度信息原子持久化在事务 metadata 中。
+
+HTTP(S) callback 直接按 URL origin 校验；`grpc://`、`grpcs://` 或上游裸 `host:port/service/method` 目标分别映射到 `http://`、`https://` origin 后受同一 `allowed_branch_origins` 约束。callback Workflow 不继承服务端默认事务超时；调用方显式设置 `TimeoutToFail` 时，超时会稳定落为 `failed`。当前实现仍需在禁编译窗口结束后完成真实 HTTP/JSON-RPC/gRPC 互操作、TLS 和故障恢复验证。

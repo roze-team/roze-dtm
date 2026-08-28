@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::Context as _;
 use async_trait::async_trait;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use sqlx::{
     mysql::{MySqlPool, MySqlRow},
@@ -116,6 +117,59 @@ pub struct WorkflowProgress {
     pub status: WorkflowProgressStatus,
     #[serde(with = "base64_bytes")]
     pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowCallbackProtocol {
+    Http,
+    JsonRpc,
+    Grpc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowCallbackRequest {
+    pub gid: String,
+    pub url: String,
+    pub operation: String,
+    pub data: Vec<u8>,
+    pub protocol: WorkflowCallbackProtocol,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowCallbackResult {
+    Completed,
+    Failed { reason: Option<String> },
+    Ongoing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowRecoveryDelay {
+    pub attempted_at_millis: u64,
+    pub retry_interval_millis: u64,
+    pub max_retry_interval_millis: u64,
+    pub backoff: bool,
+    pub outcome: String,
+}
+
+impl WorkflowRecoveryDelay {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.retry_interval_millis > 0
+                && self.max_retry_interval_millis >= self.retry_interval_millis
+                && self.max_retry_interval_millis <= 86_400_000,
+            "invalid workflow callback retry interval"
+        );
+        anyhow::ensure!(
+            !self.outcome.is_empty()
+                && self.outcome.len() <= 64
+                && self
+                    .outcome
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+            "invalid workflow callback outcome"
+        );
+        Ok(())
+    }
 }
 
 impl WorkflowProgress {
@@ -295,6 +349,10 @@ impl Transaction {
             metadata: BTreeMap::new(),
         }
     }
+
+    pub fn callback_workflow_request(&self) -> anyhow::Result<WorkflowCallbackRequest> {
+        workflow_callback_request(self)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -423,6 +481,13 @@ pub trait TransactionStore: Send + Sync + 'static {
     ) -> anyhow::Result<Transaction> {
         anyhow::bail!("workflow completion persistence is not supported by this store")
     }
+    async fn defer_workflow_recovery(
+        &self,
+        _gid: &str,
+        _delay: WorkflowRecoveryDelay,
+    ) -> anyhow::Result<Transaction> {
+        anyhow::bail!("workflow recovery persistence is not supported by this store")
+    }
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>>;
     async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>>;
     async fn list_kv(
@@ -488,6 +553,14 @@ where
             .await
     }
 
+    async fn defer_workflow_recovery(
+        &self,
+        gid: &str,
+        delay: WorkflowRecoveryDelay,
+    ) -> anyhow::Result<Transaction> {
+        (**self).defer_workflow_recovery(gid, delay).await
+    }
+
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>> {
         (**self).list_transactions().await
     }
@@ -550,6 +623,14 @@ pub trait BranchInvoker: Clone + Send + Sync + 'static {
     ) -> anyhow::Result<()> {
         self.invoke(url, payload).await
     }
+
+    async fn query_workflow_callback(
+        &self,
+        _request: &WorkflowCallbackRequest,
+        _options: &TransactionOptions,
+    ) -> anyhow::Result<WorkflowCallbackResult> {
+        anyhow::bail!("workflow callback invocation is not supported by this invoker")
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -566,6 +647,7 @@ impl BranchInvoker for NoopBranchInvoker {
 pub struct HttpBranchInvoker {
     client: reqwest::Client,
     url_policy: BranchUrlPolicy,
+    default_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -605,6 +687,14 @@ impl BranchUrlPolicy {
         }
         Ok(())
     }
+
+    pub fn validate_callback(&self, value: &str) -> anyhow::Result<()> {
+        if value.starts_with("http://") || value.starts_with("https://") {
+            return self.validate(value);
+        }
+        let target = parse_grpc_callback_target(value)?;
+        self.validate(&target.endpoint)
+    }
 }
 
 impl HttpBranchInvoker {
@@ -612,6 +702,7 @@ impl HttpBranchInvoker {
         Self {
             client: branch_http_client(None).expect("default HTTP client configuration is valid"),
             url_policy: BranchUrlPolicy::allow_all(),
+            default_timeout: None,
         }
     }
 
@@ -626,6 +717,7 @@ impl HttpBranchInvoker {
         Ok(Self {
             client: branch_http_client(Some(timeout))?,
             url_policy,
+            default_timeout: Some(timeout),
         })
     }
 }
@@ -665,6 +757,153 @@ impl BranchInvoker for HttpBranchInvoker {
             anyhow::bail!("branch call {url} failed with status {}", response.status())
         }
     }
+
+    async fn query_workflow_callback(
+        &self,
+        request: &WorkflowCallbackRequest,
+        options: &TransactionOptions,
+    ) -> anyhow::Result<WorkflowCallbackResult> {
+        options.validate()?;
+        match request.protocol {
+            WorkflowCallbackProtocol::Http => {
+                self.query_http_workflow_callback(request, options, false)
+                    .await
+            }
+            WorkflowCallbackProtocol::JsonRpc => {
+                self.query_http_workflow_callback(request, options, true)
+                    .await
+            }
+            WorkflowCallbackProtocol::Grpc => {
+                self.query_grpc_workflow_callback(request, options).await
+            }
+        }
+    }
+}
+
+impl HttpBranchInvoker {
+    async fn query_http_workflow_callback(
+        &self,
+        callback: &WorkflowCallbackRequest,
+        options: &TransactionOptions,
+        json_rpc: bool,
+    ) -> anyhow::Result<WorkflowCallbackResult> {
+        self.url_policy.validate(&callback.url)?;
+        let mut url = reqwest::Url::parse(&callback.url)?;
+        let mut request = if json_rpc {
+            let method = url
+                .query_pairs()
+                .find_map(|(name, value)| (name == "method").then(|| value.into_owned()))
+                .filter(|method| !method.is_empty())
+                .context("JSON-RPC callback URL requires a method query parameter")?;
+            let mut params = if callback.data.is_empty() {
+                serde_json::Map::new()
+            } else {
+                serde_json::from_slice::<serde_json::Value>(&callback.data)?
+                    .as_object()
+                    .cloned()
+                    .context("JSON-RPC callback data must be a JSON object")?
+            };
+            add_workflow_callback_params(&mut params, callback);
+            self.client.post(url).json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": &callback.gid,
+                "method": method,
+                "params": params,
+            }))
+        } else {
+            url.query_pairs_mut()
+                .append_pair("gid", &callback.gid)
+                .append_pair("trans_type", "workflow")
+                .append_pair("branch_id", "00")
+                .append_pair("op", &callback.operation);
+            if callback.data.is_empty() {
+                self.client.get(url)
+            } else {
+                self.client
+                    .post(url)
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .body(callback.data.clone())
+            }
+        };
+        request = apply_http_transaction_options(request, options);
+        let response = request.send().await?;
+        match response.status().as_u16() {
+            200 if json_rpc => decode_json_rpc_callback_response(response).await,
+            200 => Ok(WorkflowCallbackResult::Completed),
+            409 => Ok(WorkflowCallbackResult::Failed {
+                reason: limited_response_text(response, 4_096).await?,
+            }),
+            425 => Ok(WorkflowCallbackResult::Ongoing),
+            status => anyhow::bail!("workflow callback returned unexpected HTTP status {status}"),
+        }
+    }
+
+    async fn query_grpc_workflow_callback(
+        &self,
+        callback: &WorkflowCallbackRequest,
+        options: &TransactionOptions,
+    ) -> anyhow::Result<WorkflowCallbackResult> {
+        let target = parse_grpc_callback_target(&callback.url)?;
+        self.url_policy.validate(&target.endpoint)?;
+        let timeout = options
+            .request_timeout_millis
+            .map(Duration::from_millis)
+            .or(self.default_timeout);
+        let mut endpoint = tonic::transport::Endpoint::from_shared(target.endpoint)?;
+        if let Some(timeout) = timeout {
+            endpoint = endpoint.connect_timeout(timeout).timeout(timeout);
+        }
+        let channel = endpoint.connect().await?;
+        let mut grpc = tonic::client::Grpc::new(channel);
+        grpc.ready()
+            .await
+            .map_err(|error| anyhow::anyhow!("workflow gRPC callback is not ready: {error}"))?;
+        let mut request = tonic::Request::new(CallbackWorkflowData {
+            data: callback.data.clone(),
+        });
+        if let Some(timeout) = timeout {
+            request.set_timeout(timeout);
+        }
+        insert_grpc_metadata(&mut request, "dtm-gid", &callback.gid)?;
+        insert_grpc_metadata(&mut request, "dtm-trans_type", "workflow")?;
+        insert_grpc_metadata(&mut request, "dtm-branch_id", "00")?;
+        insert_grpc_metadata(&mut request, "dtm-op", &callback.operation)?;
+        insert_grpc_metadata(&mut request, "dtm-dtm", "")?;
+        for (name, value) in &options.branch_headers {
+            insert_grpc_metadata(&mut request, &name.to_ascii_lowercase(), value)?;
+        }
+        let path = http::uri::PathAndQuery::from_maybe_shared(target.method)?;
+        let codec =
+            tonic_prost::ProstCodec::<CallbackWorkflowData, CallbackEmpty>::default();
+        let result: Result<tonic::Response<CallbackEmpty>, tonic::Status> =
+            grpc.unary(request, path, codec).await;
+        match result {
+            Ok(_) => Ok(WorkflowCallbackResult::Completed),
+            Err(status) if status.code() == tonic::Code::Aborted => {
+                Ok(WorkflowCallbackResult::Failed {
+                    reason: bounded_reason(status.message()),
+                })
+            }
+            Err(status) if status.code() == tonic::Code::FailedPrecondition => {
+                Ok(WorkflowCallbackResult::Ongoing)
+            }
+            Err(status) => Err(status.into()),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct CallbackWorkflowData {
+    #[prost(bytes = "vec", tag = "1")]
+    data: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct CallbackEmpty {}
+
+struct GrpcCallbackTarget {
+    endpoint: String,
+    method: String,
 }
 
 fn branch_http_client(timeout: Option<Duration>) -> anyhow::Result<reqwest::Client> {
@@ -690,6 +929,149 @@ fn parse_branch_url(value: &str) -> anyhow::Result<reqwest::Url> {
         "invalid branch URL"
     );
     Ok(url)
+}
+
+fn apply_http_transaction_options(
+    mut request: reqwest::RequestBuilder,
+    options: &TransactionOptions,
+) -> reqwest::RequestBuilder {
+    if let Some(timeout) = options.request_timeout_millis {
+        request = request.timeout(Duration::from_millis(timeout));
+    }
+    for (name, value) in &options.branch_headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    request
+}
+
+fn add_workflow_callback_params(
+    params: &mut serde_json::Map<String, serde_json::Value>,
+    callback: &WorkflowCallbackRequest,
+) {
+    params.insert("gid".to_owned(), callback.gid.clone().into());
+    params.insert("trans_type".to_owned(), "workflow".into());
+    params.insert("branch_id".to_owned(), "00".into());
+    params.insert("op".to_owned(), callback.operation.clone().into());
+}
+
+async fn decode_json_rpc_callback_response(
+    response: reqwest::Response,
+) -> anyhow::Result<WorkflowCallbackResult> {
+    let body = limited_response_bytes(response, 64 * 1024).await?;
+    let value: serde_json::Value = serde_json::from_slice(&body)?;
+    let Some(error) = value.get("error").filter(|error| !error.is_null()) else {
+        return Ok(WorkflowCallbackResult::Completed);
+    };
+    let code = error
+        .get("code")
+        .and_then(serde_json::Value::as_i64)
+        .context("JSON-RPC callback error requires a numeric code")?;
+    match code {
+        -32901 => Ok(WorkflowCallbackResult::Failed {
+            reason: error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .and_then(bounded_reason),
+        }),
+        -32902 => Ok(WorkflowCallbackResult::Ongoing),
+        _ => anyhow::bail!("workflow JSON-RPC callback returned unexpected error code {code}"),
+    }
+}
+
+async fn limited_response_bytes(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> anyhow::Result<Vec<u8>> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        anyhow::bail!("workflow callback response exceeds {limit} bytes");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        anyhow::ensure!(
+            body.len().saturating_add(chunk.len()) <= limit,
+            "workflow callback response exceeds {limit} bytes"
+        );
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+async fn limited_response_text(
+    response: reqwest::Response,
+    limit: usize,
+) -> anyhow::Result<Option<String>> {
+    let body = limited_response_bytes(response, limit).await?;
+    Ok(bounded_reason(&String::from_utf8_lossy(&body)))
+}
+
+fn bounded_reason(value: &str) -> Option<String> {
+    let mut value = value.trim().to_owned();
+    if value.is_empty() {
+        return None;
+    }
+    if value.len() > 4_096 {
+        let mut boundary = 4_096;
+        while !value.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        value.truncate(boundary);
+    }
+    Some(value)
+}
+
+fn insert_grpc_metadata<T>(
+    request: &mut tonic::Request<T>,
+    name: &str,
+    value: &str,
+) -> anyhow::Result<()> {
+    let name = name.parse::<tonic::metadata::MetadataKey<tonic::metadata::Ascii>>()?;
+    let value = value.parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()?;
+    request.metadata_mut().insert(name, value);
+    Ok(())
+}
+
+fn parse_grpc_callback_target(value: &str) -> anyhow::Result<GrpcCallbackTarget> {
+    anyhow::ensure!(
+        !value.is_empty() && value.len() <= 2_048,
+        "invalid workflow gRPC callback"
+    );
+    let (scheme, remainder) = if let Some(remainder) = value
+        .strip_prefix("grpc://")
+        .or_else(|| value.strip_prefix("http://"))
+    {
+        ("http", remainder)
+    } else if let Some(remainder) = value
+        .strip_prefix("grpcs://")
+        .or_else(|| value.strip_prefix("https://"))
+    {
+        ("https", remainder)
+    } else {
+        ("http", value)
+    };
+    let (authority, method) = remainder
+        .split_once('/')
+        .context("workflow gRPC callback requires server and method")?;
+    anyhow::ensure!(
+        !authority.is_empty()
+            && !method.is_empty()
+            && !method.contains('?')
+            && !method.contains('#')
+            && method.split('/').all(|segment| !segment.is_empty()),
+        "invalid workflow gRPC callback"
+    );
+    let endpoint = format!("{scheme}://{authority}");
+    let parsed = parse_branch_url(&endpoint)?;
+    anyhow::ensure!(
+        parsed.path() == "/" && parsed.query().is_none(),
+        "invalid workflow gRPC callback"
+    );
+    Ok(GrpcCallbackTarget {
+        endpoint,
+        method: format!("/{method}"),
+    })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -767,6 +1149,19 @@ impl TransactionStore for InMemoryTransactionStore {
             .get_mut(gid)
             .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         apply_workflow_completion(tx, status, rollback_reason, result)?;
+        Ok(tx.clone())
+    }
+
+    async fn defer_workflow_recovery(
+        &self,
+        gid: &str,
+        delay: WorkflowRecoveryDelay,
+    ) -> anyhow::Result<Transaction> {
+        let mut txs = self.txs.write().await;
+        let tx = txs
+            .get_mut(gid)
+            .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        defer_workflow_recovery(tx, delay)?;
         Ok(tx.clone())
     }
 
@@ -1112,6 +1507,39 @@ impl TransactionStore for SqliteTransactionStore {
             }
         }
         anyhow::bail!("transaction {gid} workflow completion is contended")
+    }
+
+    async fn defer_workflow_recovery(
+        &self,
+        gid: &str,
+        delay: WorkflowRecoveryDelay,
+    ) -> anyhow::Result<Transaction> {
+        for _ in 0..16 {
+            let row = sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = ?")
+                .bind(gid)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+            let previous_payload = row.get::<&str, _>("payload").to_owned();
+            let mut tx: Transaction = serde_json::from_str(&previous_payload)?;
+            defer_workflow_recovery(&mut tx, delay.clone())?;
+            let payload = serde_json::to_string(&tx)?;
+            let changed = sqlx::query(
+                "UPDATE roze_dtm_transactions SET payload = ?, updated_at_millis = ? \
+                 WHERE gid = ? AND payload = ?",
+            )
+            .bind(payload)
+            .bind(tx.updated_at_millis as i64)
+            .bind(gid)
+            .bind(previous_payload)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            if changed == 1 {
+                return Ok(tx);
+            }
+        }
+        anyhow::bail!("transaction {gid} workflow recovery update is contended")
     }
 
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>> {
@@ -1495,6 +1923,34 @@ impl TransactionStore for PostgresTransactionStore {
         .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
         let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
         apply_workflow_completion(&mut tx, status, rollback_reason, result)?;
+        let payload = serde_json::to_string(&tx)?;
+        sqlx::query(
+            "UPDATE roze_dtm_transactions SET payload = $1, updated_at_millis = $2 WHERE gid = $3",
+        )
+        .bind(payload)
+        .bind(tx.updated_at_millis as i64)
+        .bind(gid)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(tx)
+    }
+
+    async fn defer_workflow_recovery(
+        &self,
+        gid: &str,
+        delay: WorkflowRecoveryDelay,
+    ) -> anyhow::Result<Transaction> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT payload FROM roze_dtm_transactions WHERE gid = $1 FOR UPDATE",
+        )
+        .bind(gid)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
+        defer_workflow_recovery(&mut tx, delay)?;
         let payload = serde_json::to_string(&tx)?;
         sqlx::query(
             "UPDATE roze_dtm_transactions SET payload = $1, updated_at_millis = $2 WHERE gid = $3",
@@ -1913,6 +2369,34 @@ impl TransactionStore for MySqlTransactionStore {
         Ok(tx)
     }
 
+    async fn defer_workflow_recovery(
+        &self,
+        gid: &str,
+        delay: WorkflowRecoveryDelay,
+    ) -> anyhow::Result<Transaction> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT payload FROM roze_dtm_transactions WHERE gid = ? FOR UPDATE",
+        )
+        .bind(gid)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        let mut tx: Transaction = serde_json::from_str(row.get::<&str, _>("payload"))?;
+        defer_workflow_recovery(&mut tx, delay)?;
+        let payload = serde_json::to_string(&tx)?;
+        sqlx::query(
+            "UPDATE roze_dtm_transactions SET payload = ?, updated_at_millis = ? WHERE gid = ?",
+        )
+        .bind(payload)
+        .bind(tx.updated_at_millis as i64)
+        .bind(gid)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(tx)
+    }
+
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>> {
         let rows =
             sqlx::query("SELECT payload FROM roze_dtm_transactions ORDER BY updated_at_millis ASC")
@@ -2262,6 +2746,200 @@ where
             .await
     }
 
+    pub async fn recover_callback_workflow(
+        &self,
+        gid: &str,
+    ) -> anyhow::Result<Transaction> {
+        let tx = self
+            .transaction_of_kind(gid, TransactionKind::Workflow)
+            .await?;
+        if tx.status.is_terminal() {
+            return Ok(tx);
+        }
+        ensure_callback_workflow(&tx)?;
+        ensure_status(&tx, &[TransactionStatus::Prepared])?;
+        let attempted_at_millis = current_millis();
+        let callback = match workflow_callback_request(&tx) {
+            Ok(callback) => callback,
+            Err(_) => {
+                tracing::error!(
+                    event = "dtm.workflow.callback.invalid",
+                    gid = %tx.gid,
+                    error_kind = "invalid_callback_contract",
+                    "Workflow callback contract is invalid"
+                );
+                return self
+                    .defer_callback_workflow(
+                        &tx,
+                        attempted_at_millis,
+                        true,
+                        "invalid_callback",
+                    )
+                    .await;
+            }
+        };
+        let result = self
+            .invoker
+            .query_workflow_callback(&callback, &tx.options)
+            .await;
+        let latest = self
+            .store
+            .get_transaction(gid)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        if latest.status.is_terminal() {
+            tracing::info!(
+                event = "dtm.workflow.callback.completed",
+                gid = %latest.gid,
+                status = ?latest.status,
+                "Workflow callback reached a terminal state"
+            );
+            return Ok(latest);
+        }
+        ensure_callback_workflow(&latest)?;
+        ensure_status(&latest, &[TransactionStatus::Prepared])?;
+        match result {
+            Ok(WorkflowCallbackResult::Failed { reason }) => {
+                tracing::warn!(
+                    event = "dtm.workflow.callback.failed",
+                    gid = %latest.gid,
+                    outcome = "business_failure",
+                    "Workflow callback reported failure"
+                );
+                match self
+                    .finish_callback_workflow(
+                        gid,
+                        TransactionStatus::Failed,
+                        reason.or_else(|| Some("workflow callback reported failure".to_owned())),
+                        None,
+                    )
+                    .await
+                {
+                    Ok(transaction) => Ok(transaction),
+                    Err(error) => self.terminal_after_conflict(gid, error).await,
+                }
+            }
+            Ok(WorkflowCallbackResult::Ongoing) => {
+                tracing::info!(
+                    event = "dtm.workflow.callback.deferred",
+                    gid = %latest.gid,
+                    outcome = "ongoing",
+                    "Workflow callback remains ongoing"
+                );
+                self.defer_callback_workflow(
+                    &latest,
+                    attempted_at_millis,
+                    false,
+                    "ongoing",
+                )
+                .await
+            }
+            Ok(WorkflowCallbackResult::Completed) => {
+                tracing::warn!(
+                    event = "dtm.workflow.callback.deferred",
+                    gid = %latest.gid,
+                    outcome = "completed_without_terminal",
+                    "Workflow callback returned success without submitting a terminal state"
+                );
+                self.defer_callback_workflow(
+                    &latest,
+                    attempted_at_millis,
+                    true,
+                    "completed_without_terminal",
+                )
+                .await
+            }
+            Err(_) => {
+                tracing::warn!(
+                    event = "dtm.workflow.callback.deferred",
+                    gid = %latest.gid,
+                    outcome = "transport_error",
+                    error_kind = "callback_transport",
+                    "Workflow callback transport failed"
+                );
+                self.defer_callback_workflow(
+                    &latest,
+                    attempted_at_millis,
+                    true,
+                    "transport_error",
+                )
+                .await
+            }
+        }
+    }
+
+    async fn defer_callback_workflow(
+        &self,
+        tx: &Transaction,
+        attempted_at_millis: u64,
+        backoff: bool,
+        outcome: &str,
+    ) -> anyhow::Result<Transaction> {
+        let retry_interval_millis = tx
+            .options
+            .retry_interval_millis
+            .unwrap_or(self.options.retry_backoff_millis)
+            .max(1);
+        let delay = WorkflowRecoveryDelay {
+            attempted_at_millis,
+            retry_interval_millis,
+            max_retry_interval_millis: self
+                .options
+                .max_retry_backoff_millis
+                .max(retry_interval_millis),
+            backoff,
+            outcome: outcome.to_owned(),
+        };
+        match self.store.defer_workflow_recovery(&tx.gid, delay).await {
+            Ok(transaction) => Ok(transaction),
+            Err(error) => self.terminal_after_conflict(&tx.gid, error).await,
+        }
+    }
+
+    async fn terminal_after_conflict(
+        &self,
+        gid: &str,
+        error: anyhow::Error,
+    ) -> anyhow::Result<Transaction> {
+        let latest = self
+            .store
+            .get_transaction(gid)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("transaction not found: {gid}"))?;
+        if latest.status.is_terminal() {
+            Ok(latest)
+        } else {
+            Err(error)
+        }
+    }
+
+    async fn expire_callback_workflow(
+        &self,
+        transaction: &Transaction,
+    ) -> anyhow::Result<Transaction> {
+        let transaction = if transaction.status == TransactionStatus::Submitted {
+            self.prepare_workflow(&transaction.gid).await?
+        } else {
+            transaction.clone()
+        };
+        ensure_status(&transaction, &[TransactionStatus::Prepared])?;
+        match self
+            .finish_callback_workflow(
+                &transaction.gid,
+                TransactionStatus::Failed,
+                Some("workflow callback timed out".to_owned()),
+                None,
+            )
+            .await
+        {
+            Ok(transaction) => Ok(transaction),
+            Err(error) => {
+                self.terminal_after_conflict(&transaction.gid, error)
+                    .await
+            }
+        }
+    }
+
     /// Validates that a transaction can be submitted by the lifecycle-managed
     /// recovery worker without performing branch I/O in the caller's request.
     pub async fn schedule_submit(&self, gid: &str) -> anyhow::Result<Transaction> {
@@ -2273,6 +2951,10 @@ where
         if tx.status == TransactionStatus::Succeeded {
             return Ok(tx);
         }
+        anyhow::ensure!(
+            !is_callback_workflow(&tx),
+            "callback workflow must submit a succeed or failed completion"
+        );
         let allowed = match tx.kind {
             TransactionKind::Tcc | TransactionKind::Xa => {
                 &[TransactionStatus::Prepared, TransactionStatus::Succeeding][..]
@@ -2696,6 +3378,10 @@ where
         if tx.status == TransactionStatus::Succeeded {
             return Ok(tx);
         }
+        anyhow::ensure!(
+            !is_callback_workflow(&tx),
+            "callback workflow is driven through its QueryPrepared callback"
+        );
         ensure_status(
             &tx,
             &[
@@ -3015,6 +3701,16 @@ where
                 branch.next_retry_millis = Some(now);
             }
         }
+        if is_callback_workflow(&tx) {
+            tx.metadata.insert(
+                "dtm.callback.next_retry_millis".to_owned(),
+                now.to_string(),
+            );
+            tx.metadata.insert(
+                "dtm.callback.last_outcome".to_owned(),
+                "manual_reset".to_owned(),
+            );
+        }
         self.store.update_transaction(tx.clone()).await?;
         Ok(tx)
     }
@@ -3051,13 +3747,7 @@ where
                 TransactionKind::Tcc => self.cancel_tcc(gid).await,
                 TransactionKind::Saga => self.abort_saga(gid).await,
                 TransactionKind::Workflow if is_callback_workflow(&tx) => {
-                    self.finish_callback_workflow(
-                        gid,
-                        TransactionStatus::Failed,
-                        Some("workflow callback timed out".to_owned()),
-                        None,
-                    )
-                    .await
+                    self.expire_callback_workflow(&tx).await
                 }
                 TransactionKind::Workflow => self.abort_workflow(gid).await,
                 TransactionKind::Message if tx.status == TransactionStatus::Succeeding => {
@@ -3068,6 +3758,15 @@ where
                     self.commit_xa(gid).await
                 }
                 TransactionKind::Xa => self.rollback_xa(gid).await,
+            };
+        }
+        if is_callback_workflow(&tx) {
+            return match tx.status {
+                TransactionStatus::Submitted => self.prepare_workflow(gid).await,
+                TransactionStatus::Prepared => self.recover_callback_workflow(gid).await,
+                status => anyhow::bail!(
+                    "callback workflow {gid} is in non-replayable state {status:?}"
+                ),
             };
         }
         match (tx.kind, tx.status) {
@@ -3118,13 +3817,7 @@ where
                     TransactionKind::Tcc => self.cancel_tcc(&tx.gid).await?,
                     TransactionKind::Saga => self.abort_saga(&tx.gid).await?,
                     TransactionKind::Workflow if is_callback_workflow(&tx) => {
-                        self.finish_callback_workflow(
-                            &tx.gid,
-                            TransactionStatus::Failed,
-                            Some("workflow callback timed out".to_owned()),
-                            None,
-                        )
-                        .await?
+                        self.expire_callback_workflow(&tx).await?
                     }
                     TransactionKind::Workflow => self.abort_workflow(&tx.gid).await?,
                     TransactionKind::Message if tx.status == TransactionStatus::Succeeding => {
@@ -3135,6 +3828,18 @@ where
                         self.commit_xa(&tx.gid).await?
                     }
                     TransactionKind::Xa => self.rollback_xa(&tx.gid).await?,
+                };
+                changed.push(next);
+                continue;
+            }
+            if is_callback_workflow(&tx) {
+                let next = match tx.status {
+                    TransactionStatus::Submitted => self.prepare_workflow(&tx.gid).await?,
+                    TransactionStatus::Prepared if callback_workflow_due(&tx, now) => {
+                        self.recover_callback_workflow(&tx.gid).await?
+                    }
+                    TransactionStatus::Prepared => continue,
+                    _ => continue,
                 };
                 changed.push(next);
                 continue;
@@ -3381,6 +4086,47 @@ fn apply_workflow_completion(
     Ok(())
 }
 
+fn defer_workflow_recovery(
+    tx: &mut Transaction,
+    delay: WorkflowRecoveryDelay,
+) -> anyhow::Result<()> {
+    ensure_callback_workflow(tx)?;
+    ensure_status(tx, &[TransactionStatus::Prepared])?;
+    delay.validate()?;
+    let attempts = tx
+        .metadata
+        .get("dtm.callback.attempts")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or_default()
+        .saturating_add(1);
+    let shift = if delay.backoff {
+        attempts.saturating_sub(1).min(16)
+    } else {
+        0
+    };
+    let retry_after = delay
+        .retry_interval_millis
+        .saturating_mul(1_u64 << shift)
+        .min(delay.max_retry_interval_millis);
+    tx.metadata
+        .insert("dtm.callback.attempts".to_owned(), attempts.to_string());
+    tx.metadata.insert(
+        "dtm.callback.last_attempt_millis".to_owned(),
+        delay.attempted_at_millis.to_string(),
+    );
+    tx.metadata.insert(
+        "dtm.callback.next_retry_millis".to_owned(),
+        delay
+            .attempted_at_millis
+            .saturating_add(retry_after)
+            .to_string(),
+    );
+    tx.metadata
+        .insert("dtm.callback.last_outcome".to_owned(), delay.outcome);
+    tx.updated_at_millis = current_millis();
+    Ok(())
+}
+
 fn ensure_callback_workflow(tx: &Transaction) -> anyhow::Result<()> {
     anyhow::ensure!(
         tx.kind == TransactionKind::Workflow,
@@ -3395,6 +4141,76 @@ fn ensure_callback_workflow(tx: &Transaction) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn workflow_callback_request(tx: &Transaction) -> anyhow::Result<WorkflowCallbackRequest> {
+    ensure_callback_workflow(tx)?;
+    let url = tx
+        .metadata
+        .get("dtm.query_prepared")
+        .cloned()
+        .context("callback workflow query URL is missing")?;
+    let custom_data = tx
+        .metadata
+        .get("dtm.custom_data")
+        .context("callback workflow custom data is missing")?;
+    anyhow::ensure!(
+        custom_data.len() <= 3 * 1024 * 1024,
+        "callback workflow custom data exceeds 3 MiB"
+    );
+    let custom_data: serde_json::Value = serde_json::from_str(custom_data)?;
+    let custom_data = custom_data
+        .as_object()
+        .context("callback workflow custom data must be a JSON object")?;
+    let operation = custom_data
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .filter(|name| !name.is_empty() && name.len() <= 128)
+        .context("callback workflow name must contain 1 to 128 bytes")?
+        .to_owned();
+    let data = match custom_data.get("data") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::String(data)) => base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .context("callback workflow data is not valid base64")?,
+        Some(serde_json::Value::Array(data)) => data
+            .iter()
+            .map(|byte| {
+                byte.as_u64()
+                    .filter(|byte| *byte <= u64::from(u8::MAX))
+                    .map(|byte| byte as u8)
+                    .context("callback workflow data array contains an invalid byte")
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?,
+        Some(_) => anyhow::bail!("callback workflow data must be base64 or a byte array"),
+    };
+    anyhow::ensure!(
+        data.len() <= 2 * 1024 * 1024,
+        "callback workflow data exceeds 2 MiB"
+    );
+    let configured_protocol = tx.metadata.get("dtm.protocol").map(String::as_str);
+    let protocol = if configured_protocol == Some("grpc") {
+        WorkflowCallbackProtocol::Grpc
+    } else if url.starts_with("http://") || url.starts_with("https://") {
+        let legacy_json_rpc = configured_protocol.is_none()
+            && reqwest::Url::parse(&url)?.query_pairs().any(|(name, value)| {
+                name == "method" && !value.is_empty()
+            });
+        if configured_protocol == Some("json-rpc") || legacy_json_rpc {
+            WorkflowCallbackProtocol::JsonRpc
+        } else {
+            WorkflowCallbackProtocol::Http
+        }
+    } else {
+        WorkflowCallbackProtocol::Grpc
+    };
+    Ok(WorkflowCallbackRequest {
+        gid: tx.gid.clone(),
+        url,
+        operation,
+        data,
+        protocol,
+    })
+}
+
 fn is_callback_workflow(tx: &Transaction) -> bool {
     tx.kind == TransactionKind::Workflow
         && tx.branches.is_empty()
@@ -3402,6 +4218,13 @@ fn is_callback_workflow(tx: &Transaction) -> bool {
             .metadata
             .get("dtm.query_prepared")
             .is_some_and(|value| !value.is_empty())
+}
+
+fn callback_workflow_due(tx: &Transaction, now: u64) -> bool {
+    tx.metadata
+        .get("dtm.callback.next_retry_millis")
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_none_or(|next| next <= now)
 }
 
 fn ensure_kind(tx: &Transaction, expected: TransactionKind) -> anyhow::Result<()> {
@@ -3574,6 +4397,12 @@ mod tests {
         options: Arc<Mutex<Option<TransactionOptions>>>,
     }
 
+    #[derive(Clone)]
+    struct StaticCallbackInvoker {
+        result: WorkflowCallbackResult,
+        calls: Arc<AtomicUsize>,
+    }
+
     #[async_trait]
     impl BranchInvoker for FailingOnceInvoker {
         async fn invoke(&self, _url: &str, _payload: &serde_json::Value) -> anyhow::Result<()> {
@@ -3621,6 +4450,22 @@ mod tests {
         ) -> anyhow::Result<()> {
             *self.options.lock().expect("recording options lock") = Some(options.clone());
             Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl BranchInvoker for StaticCallbackInvoker {
+        async fn invoke(&self, _url: &str, _payload: &serde_json::Value) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn query_workflow_callback(
+            &self,
+            _request: &WorkflowCallbackRequest,
+            _options: &TransactionOptions,
+        ) -> anyhow::Result<WorkflowCallbackResult> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.result.clone())
         }
     }
 
@@ -4193,6 +5038,156 @@ mod tests {
         );
     }
 
+    #[test]
+    fn callback_workflow_request_decodes_upstream_custom_data_and_grpc_target() {
+        let mut workflow = Transaction::workflow("gid-callback-request", Vec::new());
+        workflow.metadata.insert(
+            "dtm.query_prepared".to_owned(),
+            "grpc://127.0.0.1:50051/workflow.Workflow/Execute".to_owned(),
+        );
+        workflow.metadata.insert(
+            "dtm.custom_data".to_owned(),
+            serde_json::json!({"name": "order", "data": "AP8B"}).to_string(),
+        );
+        workflow
+            .metadata
+            .insert("dtm.protocol".to_owned(), "grpc".to_owned());
+
+        let callback = workflow
+            .callback_workflow_request()
+            .expect("callback request");
+        assert_eq!(callback.gid, "gid-callback-request");
+        assert_eq!(callback.operation, "order");
+        assert_eq!(callback.data, vec![0, 255, 1]);
+        assert_eq!(callback.protocol, WorkflowCallbackProtocol::Grpc);
+        let target = parse_grpc_callback_target(&callback.url).expect("gRPC target");
+        assert_eq!(target.endpoint, "http://127.0.0.1:50051");
+        assert_eq!(target.method, "/workflow.Workflow/Execute");
+
+        workflow.metadata.insert(
+            "dtm.query_prepared".to_owned(),
+            "https://workflow.example.com/workflow.Workflow/Execute".to_owned(),
+        );
+        let callback = workflow
+            .callback_workflow_request()
+            .expect("HTTPS gRPC callback request");
+        assert_eq!(callback.protocol, WorkflowCallbackProtocol::Grpc);
+        let target = parse_grpc_callback_target(&callback.url).expect("HTTPS gRPC target");
+        assert_eq!(target.endpoint, "https://workflow.example.com");
+        assert_eq!(target.method, "/workflow.Workflow/Execute");
+    }
+
+    #[test]
+    fn callback_workflow_recovery_delay_persists_bounded_backoff() {
+        let mut workflow = Transaction::workflow("gid-callback-backoff", Vec::new());
+        workflow.status = TransactionStatus::Prepared;
+        workflow.metadata.insert(
+            "dtm.query_prepared".to_owned(),
+            "http://workflow/callback".to_owned(),
+        );
+
+        defer_workflow_recovery(
+            &mut workflow,
+            WorkflowRecoveryDelay {
+                attempted_at_millis: 1_000,
+                retry_interval_millis: 100,
+                max_retry_interval_millis: 800,
+                backoff: true,
+                outcome: "transport_error".to_owned(),
+            },
+        )
+        .expect("first callback defer");
+        assert_eq!(workflow.metadata["dtm.callback.attempts"], "1");
+        assert_eq!(workflow.metadata["dtm.callback.next_retry_millis"], "1100");
+
+        defer_workflow_recovery(
+            &mut workflow,
+            WorkflowRecoveryDelay {
+                attempted_at_millis: 1_100,
+                retry_interval_millis: 100,
+                max_retry_interval_millis: 800,
+                backoff: true,
+                outcome: "transport_error".to_owned(),
+            },
+        )
+        .expect("second callback defer");
+        assert_eq!(workflow.metadata["dtm.callback.attempts"], "2");
+        assert_eq!(workflow.metadata["dtm.callback.next_retry_millis"], "1300");
+    }
+
+    #[tokio::test]
+    async fn callback_workflow_ongoing_result_is_persistently_deferred() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dtm = Dtm::with_options(
+            InMemoryTransactionStore::new(),
+            StaticCallbackInvoker {
+                result: WorkflowCallbackResult::Ongoing,
+                calls: Arc::clone(&calls),
+            },
+            DtmOptions {
+                retry_backoff_millis: 100,
+                max_retry_backoff_millis: 800,
+                ..DtmOptions::default()
+            },
+        );
+        let mut workflow = Transaction::workflow("gid-callback-ongoing", Vec::new());
+        workflow.metadata.insert(
+            "dtm.query_prepared".to_owned(),
+            "http://workflow/callback".to_owned(),
+        );
+        workflow.metadata.insert(
+            "dtm.custom_data".to_owned(),
+            serde_json::json!({"name": "order", "data": ""}).to_string(),
+        );
+        dtm.submit(workflow).await.expect("submit callback workflow");
+        dtm.prepare_workflow("gid-callback-ongoing")
+            .await
+            .expect("prepare callback workflow");
+
+        let deferred = dtm
+            .recover_callback_workflow("gid-callback-ongoing")
+            .await
+            .expect("defer ongoing callback");
+        assert_eq!(deferred.status, TransactionStatus::Prepared);
+        assert_eq!(deferred.metadata["dtm.callback.attempts"], "1");
+        assert_eq!(deferred.metadata["dtm.callback.last_outcome"], "ongoing");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(dtm.tick_recover_once().await.expect("not due").is_empty());
+    }
+
+    #[tokio::test]
+    async fn callback_workflow_failure_result_becomes_terminal() {
+        let dtm = Dtm::with_invoker(
+            InMemoryTransactionStore::new(),
+            StaticCallbackInvoker {
+                result: WorkflowCallbackResult::Failed {
+                    reason: Some("business failure".to_owned()),
+                },
+                calls: Arc::new(AtomicUsize::new(0)),
+            },
+        );
+        let mut workflow = Transaction::workflow("gid-callback-recovered-failure", Vec::new());
+        workflow.metadata.insert(
+            "dtm.query_prepared".to_owned(),
+            "http://workflow/callback".to_owned(),
+        );
+        workflow.metadata.insert(
+            "dtm.custom_data".to_owned(),
+            serde_json::json!({"name": "order", "data": ""}).to_string(),
+        );
+        dtm.submit(workflow).await.expect("submit callback workflow");
+        dtm.prepare_workflow("gid-callback-recovered-failure")
+            .await
+            .expect("prepare callback workflow");
+
+        let failed = dtm
+            .recover_callback_workflow("gid-callback-recovered-failure")
+            .await
+            .expect("recover failed callback");
+        assert_eq!(failed.status, TransactionStatus::Failed);
+        assert_eq!(failed.metadata["rollback_reason"], "business failure");
+    }
+
     #[tokio::test]
     async fn callback_workflow_completion_is_terminal_and_idempotent() {
         let dtm = Dtm::new(InMemoryTransactionStore::new());
@@ -4623,6 +5618,28 @@ mod tests {
             .is_err());
         assert!(policy
             .validate("https://user@inventory.example.com/reserve")
+            .is_err());
+    }
+
+    #[test]
+    fn branch_url_policy_applies_to_grpc_callback_targets() {
+        let policy = BranchUrlPolicy::from_allowed_origins([
+            "http://workflow:50051",
+            "https://secure-workflow:443",
+        ])
+        .expect("policy");
+
+        policy
+            .validate_callback("workflow:50051/workflow.Workflow/Execute")
+            .expect("allowed plaintext gRPC target");
+        policy
+            .validate_callback("grpcs://secure-workflow:443/workflow.Workflow/Execute")
+            .expect("allowed TLS gRPC target");
+        assert!(policy
+            .validate_callback("other:50051/workflow.Workflow/Execute")
+            .is_err());
+        assert!(policy
+            .validate_callback("workflow:50051/workflow.Workflow/Execute?token=secret")
             .is_err());
     }
 
