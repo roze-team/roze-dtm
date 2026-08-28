@@ -12,6 +12,7 @@ Roze 的独立分布式事务协调器，默认提供 TCC，并支持 Saga 工�
 - `service/config.yaml`：开发环境示例配置，也是服务的默认配置。
 - `docs/dtm.md`：API、部署与安全契约。
 - `docs/roadmap.md`：参考 dtm-labs/dtm 的能力矩阵与 Roze 实施顺序。
+- `sdk/`：原生 `/v1` 控制面的 TypeScript/JavaScript Web 客户端与使用说明。
 - `docs/dtm-compatibility.md`：dtm-labs/dtm HTTP 兼容端点、调用顺序和差异。
 - `docs/production-validation.md`：真实依赖、互操作、故障注入和生产证据状态。
 
@@ -99,7 +100,7 @@ Dashboard 数据不包含分支 URL、请求载荷、Header、metadata、Workflo
 
 ## Rust 客户端
 
-核心 crate 提供 `roze_dtm::client::DtmHttpClient` 和 `roze_dtm::grpc_client::DtmGrpcClient`。HTTP 客户端支持提交五类事务、XA Prepare/Commit/Rollback 与资源分支注册、逐事务 timeout/retry/Header、callback Workflow、状态转换、事务查询、topic/KV 和兼容 GID；gRPC 客户端覆盖 `dtmgimp.Dtm` 全部方法、提供二进制 Workflow 进度助手并传播 Roze Context。两种客户端均提供 named callback Workflow 助手，按上游 `{name,data}` 合同编码任意二进制数据。恢复 worker 可主动查询 HTTP、JSON-RPC 或 gRPC `QueryPrepared` callback，并持久化有上限的重试调度。生产环境应配置 Bearer token 和 `allowed_branch_origins`。
+核心 crate 提供 `roze_dtm::client::DtmHttpClient` 和 `roze_dtm::grpc_client::DtmGrpcClient`。HTTP 客户端支持提交五类事务、XA Prepare/Commit/Rollback 与资源分支注册、逐事务 timeout/retry/Header、callback Workflow、状态转换、事务查询、topic/KV 和兼容 GID；gRPC 客户端覆盖 `dtmgimp.Dtm` 全部方法、提供二进制 Workflow 进度助手并传播 Roze Context。两种客户端均提供 named callback Workflow 助手，按上游 `{name,data}` 合同编码任意二进制数据。`sdk/` 另提供浏览器及 Node.js 18+ 可用的 TypeScript/JavaScript `/v1` 客户端。恢复 worker 可主动查询 HTTP、JSON-RPC 或 gRPC `QueryPrepared` callback，并持久化有上限的重试调度。生产环境应配置 Bearer token 和 `allowed_branch_origins`。
 
 ## 上游同步
 

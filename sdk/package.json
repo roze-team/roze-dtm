@@ -1,0 +1,22 @@
+{
+  "name": "@roze-team/roze-dtm-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./roze-dtm.js",
+  "types": "./roze-dtm.ts",
+  "exports": {
+    ".": {
+      "types": "./roze-dtm.ts",
+      "import": "./roze-dtm.js"
+    }
+  },
+  "files": [
+    "roze-dtm.js",
+    "roze-dtm.ts",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
