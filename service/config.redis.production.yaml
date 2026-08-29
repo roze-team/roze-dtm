@@ -28,6 +28,10 @@ application:
     release_revision: env://ROZE_DTM_RELEASE_REVISION
     recover_interval_ms: 1000
     recovery_lease_ttl_ms: 5000
+    data_expire_seconds: 604800
+    finished_data_expire_seconds: 86400
+    retention_interval_ms: 60000
+    retention_batch_size: 256
     worker_id: env://ROZE_DTM_WORKER_ID
     allowed_branch_origins:
       - http://inventory:8080

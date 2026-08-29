@@ -17,6 +17,10 @@ application:
     release_revision: env://ROZE_DTM_RELEASE_REVISION
     recover_interval_ms: 1000
     recovery_lease_ttl_ms: 5000
+    data_expire_seconds: 604800
+    finished_data_expire_seconds: 86400
+    retention_interval_ms: 60000
+    retention_batch_size: 256
     worker_id: env://ROZE_DTM_WORKER_ID
     allowed_branch_origins:
       - http://inventory:8080
@@ -45,7 +49,9 @@ callback 使用对应的 `http://` 或 `https://` origin 加入同一白名单�
 
 生产环境禁止 `store.kind: memory`。持久化后端支持 `sqlite`、`postgres`、`mysql` 和 `redis`；数据库 URL scheme 必须与 kind 一致，`max_connections` 范围为 1–1000。Redis standalone 使用 `redis_url`，Cluster 使用一个或多个 `redis_cluster_urls`，两者仅接受 `redis://` 或 `rediss://`；Cluster 配置优先。`redis_namespace` 只允许 1–64 个 ASCII 字母、数字、`-`、`_`，用于构造显式 hash tag，禁止部署间共享命名空间。`redis_operation_timeout_ms` 范围为 1–120000，默认 5000，同时限制建连和每次 Redis 命令。`control_token` 至少 32 字节；`release_revision` 必须是当前部署对应的 40 位非零 Git revision，服务会规范化为小写并通过公开版本端点返回，用于生产证据绑定；`worker_id` 必须在同一部署中唯一。恢复租约时长至少是恢复周期的两倍。配置文件只保存 `env://` 引用，不保存明文密钥。
 
-Redis 生产配置示例见 `service/config.redis.production.yaml`。Redis 后端将事务、KV、屏障和租约分为四个 Hash，全部 key 共享显式 Cluster hash tag。租约脚本使用 Redis 服务端时间；首次获取或过期后重新获取会递增 epoch，同一 owner 在有效期内续租复用 epoch。恢复 worker 通过 fenced store 推进，事务 revision/payload CAS、Workflow 变更、屏障创建和释放均在同一 Lua 调用中校验 owner、epoch 与过期时间。事务扫描使用有界分批 `HSCAN`。当前仍需在禁编译窗口结束后执行真实 standalone/Cluster、过期接管和长耗时恢复故障测试，才能声明完整的多节点故障隔离证据。
+`data_expire_seconds` 与 dtm-labs 的 `DataExpire` 对齐，控制非终态事务自最后更新后的最长保留时间，默认 7 天；`finished_data_expire_seconds` 对齐 `FinishedDataExpire`，控制成功、已回滚和人工停止事务的保留时间，默认 1 天且不得大于前者。清理线程每 `retention_interval_ms`（1 秒至 1 天）最多处理 `retention_batch_size`（1–10000）条。五种存储均使用“持久化内容仍与扫描快照一致才删除”的 compare-and-delete，事务在扫描后被恢复或管理操作推进时不会被误删；事务记录与协调器屏障在同一存储事务或 Lua 脚本中删除。该策略会删除审计所依赖的协调记录，部署前必须按法规、对账和故障恢复窗口调整保留时间，并将持久审计 sink 与事务保留分开规划。
+
+Redis 生产配置示例见 `service/config.redis.production.yaml`。Redis 后端将事务、KV、屏障和租约分为四个 Hash，并为每个事务维护屏障索引 Set；全部 key 共享显式 Cluster hash tag。租约脚本使用 Redis 服务端时间；首次获取或过期后重新获取会递增 epoch，同一 owner 在有效期内续租复用 epoch。恢复 worker 通过 fenced store 推进，事务 revision/payload CAS、Workflow 变更、屏障创建和释放均在同一 Lua 调用中校验 owner、epoch 与过期时间。事务扫描使用有界分批 `HSCAN`，保留清理通过事务级 Set 定位屏障，不扫描全局屏障 Hash；升级前已经存在、尚无 Set 索引的屏障会按持久化分支类型推导精确字段并在同一脚本中删除。真实 standalone/三节点 Cluster 往返已纳入 CI；MOVED/ASK、节点切换、网络分区、过期接管和长耗时恢复仍需继续积累故障隔离证据。
 
 除健康、启动、就绪和指标接口外，所有 `/v1/**` 请求必须携带：
 
@@ -79,7 +85,7 @@ Authorization: Bearer <ROZE_DTM_CONTROL_TOKEN>
 - `GET /dashboard`：返回参考 Roze Admin Workspace/Resource Page 视觉的静态管理页面；页面本身不包含受保护数据，管理动作要求令牌和二次确认。
 - `GET /openapi.json`：返回覆盖原生、dtm-labs 兼容、管理和运维端点的 OpenAPI 3.1 合同。
 - `GET /healthz`、`GET /startupz`、`GET /readyz`：运行状态探针。
-- `GET /metrics`：Prometheus 指标。除 Roze HTTP/RPC 指标外，包含固定内存的 DTM registry 可用性、事务状态转换计数、分支状态观察计数和待重试观察计数；抓取不扫描事务存储。只允许事务类型、状态和固定操作名等低基数标签，禁止使用 GID、branch id、URL、payload、Header 或错误正文。
+- `GET /metrics`：Prometheus 指标。除 Roze HTTP/RPC 指标外，包含固定内存的 DTM registry 可用性、事务状态转换计数、分支状态观察计数、待重试观察计数，以及无标签的保留清理删除/冲突计数；抓取不扫描事务存储。只允许事务类型、状态和固定操作名等低基数标签，禁止使用 GID、branch id、URL、payload、Header 或错误正文。
 
 所有业务响应使用 Roze 数字信封：成功 `code: 0`，错误 code 与 HTTP 状态一致。查询参数支持 `gid`、`kind`、`status`、`offset`、`limit`；默认 limit 为 50，最大为 200。
 

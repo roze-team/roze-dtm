@@ -1,10 +1,10 @@
 # Roze DTM
 
-Roze 的独立分布式事务协调器，默认提供 TCC，并支持 Saga 工作流。代码从 `roze-team/roze` 的 `217274a134068f174cbe4a266a011bf719e15d0d` 提取，保留原有状态机、持久化、分支屏障、恢复租约和原生 Roze HTTP 控制面。
+Roze 的独立分布式事务协调器，提供 TCC、Saga、Workflow、二阶段消息和 XA。代码从 `roze-team/roze` 的 `217274a134068f174cbe4a266a011bf719e15d0d` 提取，保留原有状态机、持久化、分支屏障、恢复租约和原生 Roze HTTP 控制面，并按固定 dtm-labs 协议基线扩展兼容控制面、gRPC、五种存储与事务保留策略。
 
 ## 项目结构
 
-- `src/lib.rs`：DTM 核心库，包含 TCC、顺序/并发 DAG Saga、Workflow、二阶段消息与 XA 状态机，以及内存、SQLite、PostgreSQL、MySQL、Redis 存储、HTTP 分支调用和恢复逻辑。
+- `src/lib.rs`：DTM 核心库，包含 TCC、顺序/并发 DAG Saga、Workflow、二阶段消息与 XA 状态机，以及内存、SQLite、PostgreSQL、MySQL、Redis 存储、HTTP 分支调用、恢复逻辑和 DataExpire/FinishedDataExpire 有界 CAS 清理。
 - `src/xa.rs`：MySQL/PostgreSQL XA 业务资源管理器、屏障、prepared transaction 扫描与幂等 phase-2。
 - `service/`：独立控制面服务。
 - `service/static/openapi.json`：覆盖原生、兼容、管理与运维端点的 OpenAPI 3.1 合同。

@@ -16,7 +16,7 @@
 | 事务模式 | TCC、顺序/并发 DAG Saga、二阶段 Message、静态/回调 Workflow、XA 协调与 MySQL/PostgreSQL 资源管理器 | 源码与合同已覆盖 | 跨进程分支调用、崩溃点和真实数据库验证 |
 | HTTP/JSON-RPC | 21 条兼容路由、5 个 JSON-RPC 方法、上游 `dtm_result`、请求选项、管理/KV/topic 与线级查询 DTO | 协议静态收口 | 固定上游 Go/Node 客户端互操作 |
 | gRPC | `proto/dtmgimp.proto` 的 9 个 RPC、消息和字段号与固定上游一致，服务端与 Rust 客户端均有对应入口 | 协议静态收口 | protobuf 生成、编译和真实 gRPC 互操作 |
-| 存储 | Memory、SQLite、PostgreSQL、MySQL、Redis standalone/Cluster；事务、动态分支、Workflow、KV/topic、屏障、revision CAS、恢复 lease/fence | 源码覆盖核心语义 | 五后端矩阵、Redis Cluster/MOVED/ASK、断连与 fencing 故障注入 |
+| 存储 | Memory、SQLite、PostgreSQL、MySQL、Redis standalone/Cluster；事务、动态分支、Workflow、KV/topic、屏障、revision CAS、恢复 lease/fence，以及 DataExpire/FinishedDataExpire 有界 CAS 清理 | 源码覆盖核心语义 | 五后端矩阵、Redis Cluster/MOVED/ASK、断连与 fencing 故障注入 |
 | 客户端 | Rust HTTP/gRPC 与 TypeScript/JavaScript 原生和兼容客户端；XA、callback Workflow、topic/KV 与管理操作 | 源码与类型合同已覆盖 | 编译、类型检查及跨语言端到端 |
 | 管理 | Roze Admin 风格 Dashboard、脱敏快照、XA 对账、服务端动作声明、二次确认和有界审计时间线 | 静态页面和合同已覆盖 | 真实 Bearer、状态变更、暗色模式和浏览器端到端 |
 | 治理与运维 | 类型化生产配置、Bearer、URL allowlist、请求上限、无重定向、Roze 生命周期/健康、审计、告警、HTTP/RPC 指标及事件驱动、固定内存、低基数的 DTM 转换/分支/重试指标 | 源码与静态门禁已覆盖 | 运行时指标变化、告警接收端、依赖降级与长时间资源趋势 |
@@ -28,7 +28,7 @@
 - 不追求上游全部语言 SDK；本项目交付 Roze Rust 客户端和浏览器/Node.js TypeScript、JavaScript 客户端，兼容协议允许其他上游 SDK 接入。
 - 不复制 BoltDB 与 SQL Server 的具体适配器。SQLite 承担嵌入式开发/单实例持久化，PostgreSQL/MySQL/Redis 承担生产持久化；这是后端组合差异，不改变固定 HTTP/JSON-RPC/gRPC 协议和五种事务语义。
 - 上游数据库自增 `id` 不是事务身份；兼容 DTO 返回文档化的 `id: 0`，所有业务和管理操作以 `gid` 为唯一标识。
-- 上游 Redis/BoltDB 的 `DataExpire`/`FinishedDataExpire` 是存储保留策略，不是事务协议。当前项目未声明自动删除事务；生产环境应在取得真实恢复/审计保留要求后设计可审计清理策略，不能在迁移中静默删除协调记录。
+- 上游 Redis/BoltDB 的 `DataExpire`/`FinishedDataExpire` 已迁移为五种存储统一的显式保留策略。默认值保持 7 天/1 天，清理批次有界，使用 compare-and-delete 避免与恢复并发误删，并发冲突、删除数量和失败均进入低基数指标/审计。部署方必须根据真实恢复、对账和审计要求覆盖默认值；持久审计 sink 不随协调记录清理。
 
 ## 编译禁令解除后的验收进展
 

@@ -29,6 +29,26 @@ redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
 return 1
 "#;
 
+const DELETE_TRANSACTION_IF_UNCHANGED: &str = r#"
+local current = redis.call('HGET', KEYS[1], ARGV[1])
+if not current then
+  return -1
+end
+if current ~= ARGV[2] then
+  return 0
+end
+redis.call('HDEL', KEYS[1], ARGV[1])
+local fields = redis.call('SMEMBERS', KEYS[3])
+if table.getn(fields) > 0 then
+  redis.call('HDEL', KEYS[2], unpack(fields))
+end
+for index = 3, table.getn(ARGV) do
+  redis.call('HDEL', KEYS[2], ARGV[index])
+end
+redis.call('DEL', KEYS[3])
+return 1
+"#;
+
 const BARRIER_DECISION: &str = r#"
 if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
   return 'duplicate'
@@ -38,9 +58,11 @@ if ARGV[4] == 'try' and redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 then
 end
 if ARGV[4] == 'cancel' and redis.call('HEXISTS', KEYS[1], ARGV[3]) == 0 then
   redis.call('HSET', KEYS[1], ARGV[1], '1')
+  redis.call('SADD', KEYS[2], ARGV[1])
   return 'null_compensation'
 end
 redis.call('HSET', KEYS[1], ARGV[1], '1')
+redis.call('SADD', KEYS[2], ARGV[1])
 return 'execute'
 "#;
 
@@ -109,9 +131,11 @@ if ARGV[4] == 'try' and redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 then
 end
 if ARGV[4] == 'cancel' and redis.call('HEXISTS', KEYS[1], ARGV[3]) == 0 then
   redis.call('HSET', KEYS[1], ARGV[1], '1')
+  redis.call('SADD', KEYS[3], ARGV[1])
   return 'null_compensation'
 end
 redis.call('HSET', KEYS[1], ARGV[1], '1')
+redis.call('SADD', KEYS[3], ARGV[1])
 return 'execute'
 "#;
 
@@ -124,7 +148,9 @@ local epoch = tonumber(redis.call('HGET', KEYS[2], ARGV[4]) or '0')
 if owner ~= ARGV[5] or expiry <= now_millis or epoch ~= tonumber(ARGV[6]) then
   return -2
 end
-return redis.call('HDEL', KEYS[1], ARGV[1])
+local deleted = redis.call('HDEL', KEYS[1], ARGV[1])
+redis.call('SREM', KEYS[3], ARGV[1])
+return deleted
 "#;
 
 #[derive(Clone)]
@@ -139,6 +165,7 @@ struct RedisStoreKeys {
     transactions: String,
     kv: String,
     barriers: String,
+    barrier_index_prefix: String,
     leases: String,
 }
 
@@ -214,6 +241,7 @@ impl RedisTransactionStore {
                 transactions: format!("{prefix}:transactions"),
                 kv: format!("{prefix}:kv"),
                 barriers: format!("{prefix}:barriers"),
+                barrier_index_prefix: format!("{prefix}:barrier-index:"),
                 leases: format!("{prefix}:leases"),
             },
             operation_timeout,
@@ -241,6 +269,14 @@ impl RedisTransactionStore {
                     self.operation_timeout.as_millis()
                 )
             })?
+    }
+
+    fn barrier_index_key(&self, gid: &str) -> anyhow::Result<String> {
+        Ok(format!(
+            "{}{}",
+            self.keys.barrier_index_prefix,
+            serde_json::to_string(gid).context("encode Redis barrier index key")?
+        ))
     }
 
     async fn redis_call<T, F>(&self, operation: &str, future: F) -> anyhow::Result<T>
@@ -599,6 +635,38 @@ impl TransactionStore for RedisTransactionStore {
         Ok(transactions)
     }
 
+    async fn delete_transaction_if_unchanged(
+        &self,
+        transaction: &Transaction,
+    ) -> anyhow::Result<bool> {
+        let Some(payload) = self.transaction_payload(&transaction.gid).await? else {
+            return Ok(false);
+        };
+        let current: Transaction = serde_json::from_str(&payload)?;
+        if &current != transaction {
+            return Ok(false);
+        }
+        let mut connection = self.connection().await?;
+        let deleted: i64 = self
+            .redis_call(
+                "transaction retention delete",
+                redis::Script::new(DELETE_TRANSACTION_IF_UNCHANGED)
+                    .key(&self.keys.transactions)
+                    .key(&self.keys.barriers)
+                    .key(self.barrier_index_key(&transaction.gid)?)
+                    .arg(&transaction.gid)
+                    .arg(payload)
+                    .arg(transaction_barrier_fields(transaction)?)
+                    .invoke_async(&mut connection),
+            )
+            .await?;
+        match deleted {
+            1 => Ok(true),
+            0 | -1 => Ok(false),
+            other => anyhow::bail!("unknown Redis transaction retention result: {other}"),
+        }
+    }
+
     async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>> {
         let field = kv_field(category, key);
         let mut connection = self.connection().await?;
@@ -723,6 +791,7 @@ impl TransactionStore for RedisTransactionStore {
                 "barrier decision",
                 redis::Script::new(BARRIER_DECISION)
                     .key(&self.keys.barriers)
+                    .key(self.barrier_index_key(&barrier.gid)?)
                     .arg(field)
                     .arg(cancel_field)
                     .arg(try_field)
@@ -756,6 +825,7 @@ impl TransactionStore for RedisTransactionStore {
                 redis::Script::new(FENCED_BARRIER_DECISION)
                     .key(&self.keys.barriers)
                     .key(&self.keys.leases)
+                    .key(self.barrier_index_key(&barrier.gid)?)
                     .arg(field)
                     .arg(cancel_field)
                     .arg(try_field)
@@ -779,17 +849,23 @@ impl TransactionStore for RedisTransactionStore {
     }
 
     async fn release_barrier(&self, barrier: &BranchBarrier) -> anyhow::Result<()> {
+        let field = barrier_field(&barrier.gid, &barrier.branch_id, &barrier.op)?;
         let mut connection = self.connection().await?;
         let _: i64 = self
             .redis_call(
                 "barrier release",
                 redis::cmd("HDEL")
                     .arg(&self.keys.barriers)
-                    .arg(barrier_field(
-                        &barrier.gid,
-                        &barrier.branch_id,
-                        &barrier.op,
-                    )?)
+                    .arg(&field)
+                    .query_async(&mut connection),
+            )
+            .await?;
+        let _: i64 = self
+            .redis_call(
+                "barrier index release",
+                redis::cmd("SREM")
+                    .arg(self.barrier_index_key(&barrier.gid)?)
+                    .arg(field)
                     .query_async(&mut connection),
             )
             .await?;
@@ -810,6 +886,7 @@ impl TransactionStore for RedisTransactionStore {
                 redis::Script::new(FENCED_DELETE_HASH_FIELD)
                     .key(&self.keys.barriers)
                     .key(&self.keys.leases)
+                    .key(self.barrier_index_key(&barrier.gid)?)
                     .arg(barrier_field(
                         &barrier.gid,
                         &barrier.branch_id,
@@ -941,6 +1018,27 @@ fn barrier_field(gid: &str, branch_id: &str, op: &str) -> anyhow::Result<String>
     serde_json::to_string(&(gid, branch_id, op)).context("encode Redis barrier field")
 }
 
+fn transaction_barrier_fields(transaction: &Transaction) -> anyhow::Result<Vec<String>> {
+    let mut fields = Vec::with_capacity(transaction.branches.len().saturating_mul(3));
+    for branch in &transaction.branches {
+        let operations: &[&str] = match branch.kind {
+            crate::BranchKind::SagaAction | crate::BranchKind::SagaCompensate => {
+                &["action", "compensate"]
+            }
+            crate::BranchKind::TccTry
+            | crate::BranchKind::TccConfirm
+            | crate::BranchKind::TccCancel => &["try", "confirm", "cancel"],
+            crate::BranchKind::WorkflowAction => &["workflow", "workflow_rollback"],
+            crate::BranchKind::MessageAction => &["message"],
+            crate::BranchKind::XaAction => &["commit", "rollback"],
+        };
+        for operation in operations {
+            fields.push(barrier_field(&transaction.gid, &branch.id, operation)?);
+        }
+    }
+    Ok(fields)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -964,6 +1062,7 @@ mod tests {
             &store.keys.transactions,
             &store.keys.kv,
             &store.keys.barriers,
+            &store.keys.barrier_index_prefix,
             &store.keys.leases,
         ] {
             assert!(key.contains("{orders-prod}"));
@@ -986,6 +1085,23 @@ mod tests {
             barrier_field("a", "b:c", "try").expect("field")
         );
         assert_ne!(lease_fields("ab").0, lease_fields("a").0);
+        let transaction = Transaction::tcc(
+            "legacy-gid",
+            vec![Branch::tcc_try(
+                "inventory",
+                "http://inventory/try",
+                "http://inventory/confirm",
+                "http://inventory/cancel",
+                serde_json::json!({}),
+            )],
+        );
+        let fields = transaction_barrier_fields(&transaction).expect("legacy barrier fields");
+        assert_eq!(fields.len(), 3);
+        for operation in ["try", "confirm", "cancel"] {
+            assert!(fields.contains(
+                &barrier_field("legacy-gid", "inventory", operation).expect("barrier field")
+            ));
+        }
     }
 
     #[test]
@@ -1002,6 +1118,8 @@ mod tests {
             assert!(script.contains("now_millis"));
         }
         assert!(ACQUIRE_RECOVERY_LEASE.contains("next_epoch = current_epoch + 1"));
+        assert!(DELETE_TRANSACTION_IF_UNCHANGED.contains("SMEMBERS"));
+        assert!(!DELETE_TRANSACTION_IF_UNCHANGED.contains("HKEYS"));
         assert!(validate_recovery_fence(&RecoveryLeaseFence {
             name: "recovery".to_owned(),
             owner: "worker-a".to_owned(),
@@ -1095,6 +1213,37 @@ mod tests {
             .update_transaction_fenced(fenced_transaction, &stale)
             .await
             .is_err());
+        let barrier = BranchBarrier::new("redis-gid", "01", "try");
+        assert_eq!(
+            store
+                .barrier(barrier.clone())
+                .await
+                .expect("create barrier"),
+            BarrierDecision::Execute
+        );
+        let mut connection = store.connection().await.expect("Redis connection");
+        let _: i64 = redis::cmd("DEL")
+            .arg(
+                store
+                    .barrier_index_key("redis-gid")
+                    .expect("barrier index key"),
+            )
+            .query_async(&mut connection)
+            .await
+            .expect("simulate pre-index barrier record");
+        let snapshot = store
+            .get_transaction("redis-gid")
+            .await
+            .expect("read retention transaction")
+            .expect("retention transaction exists");
+        assert!(store
+            .delete_transaction_if_unchanged(&snapshot)
+            .await
+            .expect("delete unchanged transaction"));
+        assert_eq!(
+            store.barrier(barrier).await.expect("barrier was cleaned"),
+            BarrierDecision::Execute
+        );
     }
 
     #[tokio::test]

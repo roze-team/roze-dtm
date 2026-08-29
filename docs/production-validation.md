@@ -28,7 +28,7 @@ bash scripts/redis-integration.sh
 - 普通控制面写入与恢复写入并发时，stale transaction revision 被拒绝且动态分支不会被静默覆盖。
 - Cluster MOVED/ASK、节点重启、主从切换、断连恢复及同槽脚本行为。
 
-当前状态：服务端时间 + epoch 租约、恢复 fenced store、事务 revision/payload CAS、Workflow/屏障 fenced Lua 和 ignored integration tests 已加入源码；workspace 编译、单元测试和 Clippy 已在本地通过。CI 已启动 Redis standalone 与三节点 Cluster 并通过两组真实集成测试；MOVED/ASK、节点重启、主从切换、网络分区和长时间运行仍为 `inconclusive`。
+当前状态：服务端时间 + epoch 租约、恢复 fenced store、事务 revision/payload CAS、Workflow/屏障 fenced Lua、事务级屏障清理索引和 ignored integration tests 已加入源码；workspace 编译、单元测试和 Clippy 已在本地通过。CI 已启动 Redis standalone 与三节点 Cluster并通过两组真实集成测试，真实 Redis 测试同时覆盖保留 compare-and-delete 及屏障索引清理；MOVED/ASK、节点重启、主从切换、网络分区和长时间运行仍为 `inconclusive`。
 
 ## 协议互操作
 
@@ -44,7 +44,7 @@ HTTP、JSON-RPC 和 gRPC 兼容协议需要使用固定上游客户端版本执�
 
 `scripts/production-http-contract-smoke.mjs` 可对已运行的生产候选执行 12 项只读检查：三类探针、指标、OpenAPI、未授权拒绝、授权统计、Dashboard 脱敏、XA 对账、部署修订号、dtm-labs HTTP 和 JSON-RPC。运行必须绑定完整 Git revision 和显式部署拓扑；服务端 `/api/dtmsvr/version` 返回的 `release_revision` 必须与 `ROZE_DTM_EXPECTED_REVISION` 完全一致。脚本会将 OpenAPI/指标快照及检查结果写入证据目录。`scripts/validate-production-evidence.py` 独立校验时间范围、拓扑、判定一致性、检查项唯一性、相对工件路径、字节数与 SHA-256；通过烟测仍只证明该次短时 HTTP 合同，不替代数据库故障注入或 24h/72h soak。
 
-指标 smoke 还要求 `roze_dtm_metrics_registry_available 1` 存在。生产验收必须在创建、推进、失败、重试和终态后核对 `roze_dtm_transaction_transitions_total`、`roze_dtm_branch_state_observations_total` 与 `roze_dtm_retry_scheduled_observations_total` 的单调变化，并确认抓取不触发存储全表扫描、指标中不存在 GID、branch id、URL、payload、Header、控制令牌或错误正文；静态源码测试不能替代该运行验证。
+指标 smoke 还要求 `roze_dtm_metrics_registry_available 1` 存在。生产验收必须在创建、推进、失败、重试和终态后核对 `roze_dtm_transaction_transitions_total`、`roze_dtm_branch_state_observations_total` 与 `roze_dtm_retry_scheduled_observations_total` 的单调变化；将测试事务时间推进到配置保留边界后，还要核对 `roze_dtm_retention_deleted_total` / `roze_dtm_retention_conflicts_total`、协调记录与屏障的同步删除，以及扫描后并发更新不会被删除。确认抓取不触发存储全表扫描、指标中不存在 GID、branch id、URL、payload、Header、控制令牌或错误正文；静态源码测试不能替代该运行验证。
 
 ## XA Resource Manager
 

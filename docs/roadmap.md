@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | TCC | 已支持 | Try/Confirm/Cancel、空回滚、防悬挂、幂等屏障与失败恢复 |
 | Saga | 已支持核心 | 顺序执行、依赖 DAG 分层并发、逆依赖并发补偿、重试与超时恢复；真实并发故障注入待补 |
-| 存储 | 已支持核心 | Memory、SQLite、PostgreSQL、MySQL、Redis standalone/Cluster；关系型后端与 Redis standalone/三节点 Cluster 往返已通过 CI，切换故障证据待补 |
+| 存储 | 已支持核心 | Memory、SQLite、PostgreSQL、MySQL、Redis standalone/Cluster；DataExpire/FinishedDataExpire 有界 CAS 清理覆盖五后端；关系型后端与 Redis standalone/三节点 Cluster 往返已通过 CI，切换故障证据待补 |
 | 高可用恢复 | 已支持 | 持久化租约保证同一时刻只有一个恢复 worker 推进事务 |
 | 控制面 | 已支持 | Roze HTTP、数字响应信封、鉴权、健康检查、HTTP/RPC 与低基数 DTM 业务指标、审计事件 |
 | 重试告警 | 已支持核心 | dtm-labs AlertWebHook 负载、顺序/并发失败阈值、超时与脱敏；真实 HTTPS 故障矩阵待补 |
@@ -17,7 +17,7 @@
 | 二阶段消息 | 已支持核心 | Prepared/Dispatch/Abort、顺序/并发投递、部分失败精确重试、持久化延迟投递、上游顶层 `concurrent` 与 `custom_data.delay`，并复用 `roze-transaction` Outbox/Inbox 与 `roze-mq`；真实重启跨投递点验证待补 |
 | Topic/KV | 已支持核心 | 通用版本化 KV、订阅增删查、HTTP 兼容端点与 `topic://` 消息分支展开 |
 | Workflow DSL | 已支持核心 | 静态依赖图、恢复和逆序补偿；callback Workflow 支持复合进度、终态及 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复，互操作待验证 |
-| Redis 存储 | 已支持核心 | Roze topology、revision CAS/屏障、服务端时间 + epoch 租约、恢复写入 fencing、KV/topic 已通过 standalone/三节点 Cluster CI；MOVED/ASK、切换和分区故障证据待补 |
+| Redis 存储 | 已支持核心 | Roze topology、revision CAS/屏障、事务级屏障清理索引、服务端时间 + epoch 租约、恢复写入 fencing、KV/topic 已通过 standalone/三节点 Cluster CI；MOVED/ASK、切换和分区故障证据待补 |
 | SDK | 已支持 Web 范围 | 已提供 Rust HTTP/gRPC client，以及 TypeScript/JavaScript `/v1` 与 dtm-labs HTTP/JSON-RPC 兼容客户端 |
 | OpenAPI | 已支持 | OpenAPI 3.1 覆盖全部 54 条 HTTP 路径，支持自由 JSON payload、Bearer 安全声明、确定性生成和 Router 覆盖校验 |
 | Dashboard | 已支持核心 | Roze Admin 风格脱敏快照、服务端动作声明、二次确认管理操作、独立页面和有界审计时间线已通过真实服务 API smoke；Roze Admin 内嵌模块和暗色浏览器端到端待补 |

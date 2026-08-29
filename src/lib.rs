@@ -454,6 +454,40 @@ pub struct DtmOptions {
     pub transaction_timeout_millis: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionPolicy {
+    pub data_expire_millis: u64,
+    pub finished_data_expire_millis: u64,
+    pub batch_size: usize,
+}
+
+impl RetentionPolicy {
+    pub fn validate(self) -> anyhow::Result<Self> {
+        anyhow::ensure!(self.data_expire_millis > 0, "data expiry must be positive");
+        anyhow::ensure!(
+            self.finished_data_expire_millis > 0,
+            "finished data expiry must be positive"
+        );
+        anyhow::ensure!(
+            self.finished_data_expire_millis <= self.data_expire_millis,
+            "finished data expiry must not exceed data expiry"
+        );
+        anyhow::ensure!(
+            (1..=10_000).contains(&self.batch_size),
+            "retention batch size must be between 1 and 10000"
+        );
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RetentionReport {
+    pub scanned: usize,
+    pub eligible: usize,
+    pub deleted: usize,
+    pub conflicts: usize,
+}
+
 impl Default for DtmOptions {
     fn default() -> Self {
         Self {
@@ -580,6 +614,18 @@ pub trait TransactionStore: Send + Sync + 'static {
         self.defer_workflow_recovery(gid, delay).await
     }
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>>;
+    /// Deletes a transaction and its coordinator-owned barrier records only
+    /// when the persisted transaction still equals the supplied snapshot.
+    ///
+    /// Retention workers use this compare-and-delete contract so a concurrent
+    /// recovery or control operation cannot be erased after it advances the
+    /// transaction revision.
+    async fn delete_transaction_if_unchanged(
+        &self,
+        _transaction: &Transaction,
+    ) -> anyhow::Result<bool> {
+        anyhow::bail!("transaction retention is not supported by this store")
+    }
     async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>>;
     async fn list_kv(
         &self,
@@ -728,6 +774,13 @@ where
         (**self).list_transactions().await
     }
 
+    async fn delete_transaction_if_unchanged(
+        &self,
+        transaction: &Transaction,
+    ) -> anyhow::Result<bool> {
+        (**self).delete_transaction_if_unchanged(transaction).await
+    }
+
     async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>> {
         (**self).get_kv(category, key).await
     }
@@ -868,6 +921,15 @@ where
 
     async fn list_transactions(&self) -> anyhow::Result<Vec<Transaction>> {
         self.inner.list_transactions().await
+    }
+
+    async fn delete_transaction_if_unchanged(
+        &self,
+        transaction: &Transaction,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_transaction_if_unchanged(transaction)
+            .await
     }
 
     async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>> {
@@ -1499,7 +1561,7 @@ fn parse_grpc_callback_target(value: &str) -> anyhow::Result<GrpcCallbackTarget>
 pub struct InMemoryTransactionStore {
     txs: Arc<RwLock<BTreeMap<String, Transaction>>>,
     kv: Arc<RwLock<BTreeMap<(String, String), KvEntry>>>,
-    barriers: Arc<RwLock<BTreeSet<String>>>,
+    barriers: Arc<RwLock<BTreeSet<(String, String, String)>>>,
     leases: Arc<RwLock<BTreeMap<String, RecoveryLease>>>,
 }
 
@@ -1590,6 +1652,22 @@ impl TransactionStore for InMemoryTransactionStore {
         Ok(self.txs.read().await.values().cloned().collect())
     }
 
+    async fn delete_transaction_if_unchanged(
+        &self,
+        transaction: &Transaction,
+    ) -> anyhow::Result<bool> {
+        let mut transactions = self.txs.write().await;
+        if transactions.get(&transaction.gid) != Some(transaction) {
+            return Ok(false);
+        }
+        transactions.remove(&transaction.gid);
+        self.barriers
+            .write()
+            .await
+            .retain(|(gid, _, _)| gid != &transaction.gid);
+        Ok(true)
+    }
+
     async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>> {
         Ok(self
             .kv
@@ -1655,13 +1733,25 @@ impl TransactionStore for InMemoryTransactionStore {
 
     async fn barrier(&self, barrier: BranchBarrier) -> anyhow::Result<BarrierDecision> {
         let mut barriers = self.barriers.write().await;
-        let key = barrier.key();
+        let key = (
+            barrier.gid.clone(),
+            barrier.branch_id.clone(),
+            barrier.op.clone(),
+        );
         if barriers.contains(&key) {
             return Ok(BarrierDecision::SkipDuplicate);
         }
 
-        let cancel_key = format!("{}:{}:cancel", barrier.gid, barrier.branch_id);
-        let try_key = format!("{}:{}:try", barrier.gid, barrier.branch_id);
+        let cancel_key = (
+            barrier.gid.clone(),
+            barrier.branch_id.clone(),
+            "cancel".to_owned(),
+        );
+        let try_key = (
+            barrier.gid.clone(),
+            barrier.branch_id.clone(),
+            "try".to_owned(),
+        );
         if barrier.op == "try" && barriers.contains(&cancel_key) {
             return Ok(BarrierDecision::SkipCancelledTry);
         }
@@ -1675,7 +1765,11 @@ impl TransactionStore for InMemoryTransactionStore {
     }
 
     async fn release_barrier(&self, barrier: &BranchBarrier) -> anyhow::Result<()> {
-        self.barriers.write().await.remove(&barrier.key());
+        self.barriers.write().await.remove(&(
+            barrier.gid.clone(),
+            barrier.branch_id.clone(),
+            barrier.op.clone(),
+        ));
         Ok(())
     }
 
@@ -1966,6 +2060,42 @@ impl TransactionStore for SqliteTransactionStore {
         rows.into_iter()
             .map(|row| serde_json::from_str(row.get::<&str, _>("payload")).map_err(Into::into))
             .collect()
+    }
+
+    async fn delete_transaction_if_unchanged(
+        &self,
+        transaction: &Transaction,
+    ) -> anyhow::Result<bool> {
+        let mut database_transaction = self.pool.begin().await?;
+        let Some(row) = sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = ?")
+            .bind(&transaction.gid)
+            .fetch_optional(&mut *database_transaction)
+            .await?
+        else {
+            database_transaction.rollback().await?;
+            return Ok(false);
+        };
+        let payload = row.get::<String, _>("payload");
+        let current: Transaction = serde_json::from_str(&payload)?;
+        if &current != transaction {
+            database_transaction.rollback().await?;
+            return Ok(false);
+        }
+        let deleted =
+            sqlx::query("DELETE FROM roze_dtm_transactions WHERE gid = ? AND payload = ?")
+                .bind(&transaction.gid)
+                .bind(payload)
+                .execute(&mut *database_transaction)
+                .await?
+                .rows_affected();
+        if deleted == 1 {
+            sqlx::query("DELETE FROM roze_dtm_barriers WHERE gid = ?")
+                .bind(&transaction.gid)
+                .execute(&mut *database_transaction)
+                .await?;
+        }
+        database_transaction.commit().await?;
+        Ok(deleted == 1)
     }
 
     async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>> {
@@ -2386,6 +2516,42 @@ impl TransactionStore for PostgresTransactionStore {
         rows.into_iter()
             .map(|row| serde_json::from_str(row.get::<&str, _>("payload")).map_err(Into::into))
             .collect()
+    }
+
+    async fn delete_transaction_if_unchanged(
+        &self,
+        transaction: &Transaction,
+    ) -> anyhow::Result<bool> {
+        let mut database_transaction = self.pool.begin().await?;
+        let Some(row) = sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = $1")
+            .bind(&transaction.gid)
+            .fetch_optional(&mut *database_transaction)
+            .await?
+        else {
+            database_transaction.rollback().await?;
+            return Ok(false);
+        };
+        let payload = row.get::<String, _>("payload");
+        let current: Transaction = serde_json::from_str(&payload)?;
+        if &current != transaction {
+            database_transaction.rollback().await?;
+            return Ok(false);
+        }
+        let deleted =
+            sqlx::query("DELETE FROM roze_dtm_transactions WHERE gid = $1 AND payload = $2")
+                .bind(&transaction.gid)
+                .bind(payload)
+                .execute(&mut *database_transaction)
+                .await?
+                .rows_affected();
+        if deleted == 1 {
+            sqlx::query("DELETE FROM roze_dtm_barriers WHERE gid = $1")
+                .bind(&transaction.gid)
+                .execute(&mut *database_transaction)
+                .await?;
+        }
+        database_transaction.commit().await?;
+        Ok(deleted == 1)
     }
 
     async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>> {
@@ -2815,6 +2981,42 @@ impl TransactionStore for MySqlTransactionStore {
             .collect()
     }
 
+    async fn delete_transaction_if_unchanged(
+        &self,
+        transaction: &Transaction,
+    ) -> anyhow::Result<bool> {
+        let mut database_transaction = self.pool.begin().await?;
+        let Some(row) = sqlx::query("SELECT payload FROM roze_dtm_transactions WHERE gid = ?")
+            .bind(&transaction.gid)
+            .fetch_optional(&mut *database_transaction)
+            .await?
+        else {
+            database_transaction.rollback().await?;
+            return Ok(false);
+        };
+        let payload = row.get::<String, _>("payload");
+        let current: Transaction = serde_json::from_str(&payload)?;
+        if &current != transaction {
+            database_transaction.rollback().await?;
+            return Ok(false);
+        }
+        let deleted =
+            sqlx::query("DELETE FROM roze_dtm_transactions WHERE gid = ? AND payload = ?")
+                .bind(&transaction.gid)
+                .bind(payload)
+                .execute(&mut *database_transaction)
+                .await?
+                .rows_affected();
+        if deleted == 1 {
+            sqlx::query("DELETE FROM roze_dtm_barriers WHERE gid = ?")
+                .bind(&transaction.gid)
+                .execute(&mut *database_transaction)
+                .await?;
+        }
+        database_transaction.commit().await?;
+        Ok(deleted == 1)
+    }
+
     async fn get_kv(&self, category: &str, key: &str) -> anyhow::Result<Option<KvEntry>> {
         let row = sqlx::query(
             "SELECT category, entry_key, entry_value, version, created_at_millis, \
@@ -3049,6 +3251,42 @@ where
 
     pub fn store(&self) -> &S {
         &self.store
+    }
+
+    pub async fn purge_expired_transactions(
+        &self,
+        policy: RetentionPolicy,
+    ) -> anyhow::Result<RetentionReport> {
+        let policy = policy.validate()?;
+        let now = current_millis();
+        let mut transactions = self.store.list_transactions().await?;
+        transactions.sort_by(|left, right| {
+            left.updated_at_millis
+                .cmp(&right.updated_at_millis)
+                .then_with(|| left.gid.cmp(&right.gid))
+        });
+
+        let mut report = RetentionReport {
+            scanned: transactions.len(),
+            ..RetentionReport::default()
+        };
+        for transaction in transactions
+            .into_iter()
+            .filter(|transaction| transaction_expired(transaction, now, policy))
+            .take(policy.batch_size)
+        {
+            report.eligible += 1;
+            if self
+                .store
+                .delete_transaction_if_unchanged(&transaction)
+                .await?
+            {
+                report.deleted += 1;
+            } else {
+                report.conflicts += 1;
+            }
+        }
+        Ok(report)
     }
 
     async fn persist_transaction(&self, transaction: &mut Transaction) -> anyhow::Result<()> {
@@ -4836,6 +5074,15 @@ where
     }
 }
 
+fn transaction_expired(transaction: &Transaction, now: u64, policy: RetentionPolicy) -> bool {
+    let retention = if transaction.status.is_terminal() {
+        policy.finished_data_expire_millis
+    } else {
+        policy.data_expire_millis
+    };
+    transaction.updated_at_millis <= now.saturating_sub(retention)
+}
+
 async fn notify_branch_failure<I: BranchInvoker>(
     invoker: &I,
     gid: &str,
@@ -5540,6 +5787,81 @@ mod tests {
 
         assert_eq!(submitted.revision, 1);
         assert_eq!(stored.revision, 1);
+    }
+
+    #[tokio::test]
+    async fn retention_uses_terminal_ttl_batching_and_compare_delete() {
+        let store = InMemoryTransactionStore::new();
+        let now = current_millis();
+        let two_days = 2 * 24 * 60 * 60 * 1_000;
+
+        let mut expired = Transaction::tcc("retention-expired", Vec::new());
+        expired.status = TransactionStatus::Succeeded;
+        expired.created_at_millis = now.saturating_sub(two_days);
+        expired.updated_at_millis = now.saturating_sub(two_days);
+        store
+            .insert_transaction(expired)
+            .await
+            .expect("insert expired transaction");
+        assert_eq!(
+            store
+                .barrier(BranchBarrier::new("retention-expired", "01", "try"))
+                .await
+                .expect("create barrier"),
+            BarrierDecision::Execute
+        );
+
+        let mut active = Transaction::tcc("retention-active", Vec::new());
+        active.updated_at_millis = now.saturating_sub(two_days);
+        store
+            .insert_transaction(active.clone())
+            .await
+            .expect("insert active transaction");
+        let fresh = Transaction::tcc("retention-fresh", Vec::new());
+        store
+            .insert_transaction(fresh)
+            .await
+            .expect("insert fresh transaction");
+
+        let dtm = Dtm::new(store.clone());
+        let report = dtm
+            .purge_expired_transactions(RetentionPolicy {
+                data_expire_millis: 7 * 24 * 60 * 60 * 1_000,
+                finished_data_expire_millis: 24 * 60 * 60 * 1_000,
+                batch_size: 10,
+            })
+            .await
+            .expect("purge expired transactions");
+        assert_eq!(report.scanned, 3);
+        assert_eq!(report.eligible, 1);
+        assert_eq!(report.deleted, 1);
+        assert_eq!(report.conflicts, 0);
+        assert!(store
+            .get_transaction("retention-expired")
+            .await
+            .expect("read expired transaction")
+            .is_none());
+        assert_eq!(
+            store
+                .barrier(BranchBarrier::new("retention-expired", "01", "try"))
+                .await
+                .expect("barrier was cleaned"),
+            BarrierDecision::Execute
+        );
+
+        let stale_snapshot = active;
+        let mut advanced = stale_snapshot.clone();
+        advanced
+            .metadata
+            .insert("owner".to_owned(), "recovery".to_owned());
+        store
+            .update_transaction(advanced)
+            .await
+            .expect("advance active transaction");
+        assert!(!store
+            .delete_transaction_if_unchanged(&stale_snapshot)
+            .await
+            .expect("compare delete stale snapshot"));
     }
 
     #[derive(Clone)]
@@ -6908,6 +7230,17 @@ mod tests {
                 .await
                 .expect("barrier"),
             BarrierDecision::SkipDuplicate
+        );
+        assert!(store
+            .delete_transaction_if_unchanged(&tx)
+            .await
+            .expect("retention delete"));
+        assert_eq!(
+            store
+                .barrier(BranchBarrier::new("gid-sqlite", "b1", "try"))
+                .await
+                .expect("barrier was cleaned"),
+            BarrierDecision::Execute
         );
     }
 

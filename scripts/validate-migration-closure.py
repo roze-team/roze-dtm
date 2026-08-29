@@ -12,6 +12,7 @@ GRPC = (ROOT / "service/src/grpc.rs").read_text(encoding="utf-8")
 HTTP_CLIENT = (ROOT / "src/client.rs").read_text(encoding="utf-8")
 GRPC_CLIENT = (ROOT / "src/grpc_client.rs").read_text(encoding="utf-8")
 XA = (ROOT / "src/xa.rs").read_text(encoding="utf-8")
+REDIS_STORE = (ROOT / "src/redis_store.rs").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 CLOSURE = (ROOT / "docs/migration-closure.md").read_text(encoding="utf-8")
 
@@ -23,7 +24,7 @@ for store in [
     "PostgresTransactionStore", "MySqlTransactionStore",
 ]:
     assert f"pub struct {store}" in CORE, {"missing_store": store}
-assert "pub struct RedisTransactionStore" in (ROOT / "src/redis_store.rs").read_text(encoding="utf-8")
+assert "pub struct RedisTransactionStore" in REDIS_STORE
 
 for method in [
     "prepare_tcc", "confirm_tcc", "cancel_tcc", "start_saga", "abort_saga",
@@ -36,7 +37,8 @@ for method in [
 for contract in [
     "register_branch", "record_workflow_progress", "finish_workflow",
     "defer_workflow_recovery", "barrier_fenced", "acquire_recovery_lease",
-    "get_kv", "list_kv", "create_kv", "update_kv", "delete_kv",
+    "delete_transaction_if_unchanged", "get_kv", "list_kv", "create_kv",
+    "update_kv", "delete_kv",
 ]:
     assert f"async fn {contract}" in CORE, {"missing_store_contract": contract}
 
@@ -54,8 +56,9 @@ for requirement in [
     "allowed_branch_origins", "roze_log::audit_", "roze_dtm_metrics_registry_available",
     "roze_dtm_transaction_transitions_total", "roze_dtm_branch_state_observations_total",
     "roze_dtm_retry_scheduled_observations_total",
+    "roze_dtm_retention_deleted_total", "roze_dtm_retention_conflicts_total",
     "dtm.compat.http.prepare", "dtm.compat.json_rpc.prepare",
-    "dtm.recovery.completed", "audit_resource_operation",
+    "dtm.recovery.completed", "dtm.retention.completed", "audit_resource_operation",
 ]:
     assert requirement in SERVICE, {"missing_roze_governance": requirement}
 
@@ -64,6 +67,11 @@ for requirement in [
     "audit_transition", "audit_compat_failure", "audit_resource_operation",
 ]:
     assert requirement in GRPC, {"missing_grpc_governance": requirement}
+
+for requirement in [
+    "DELETE_TRANSACTION_IF_UNCHANGED", "barrier_index_prefix", "SMEMBERS",
+]:
+    assert requirement in REDIS_STORE, {"missing_redis_retention_contract": requirement}
 
 for artifact in [
     "docs/dtm.md", "docs/dtm-grpc.md", "docs/dtm-compatibility.md",
@@ -78,6 +86,7 @@ for phrase in [
     "编译禁令解除后的验收进展",
     "cargo fmt --all -- --check",
     "完整本地短时验收与真实依赖 CI 已通过",
+    "DataExpire", "FinishedDataExpire",
     "24h/72h soak",
 ]:
     assert phrase in CLOSURE, {"missing_closure_statement": phrase}

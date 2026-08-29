@@ -60,8 +60,29 @@ async fn exercise_store(store: Arc<dyn TransactionStore>, prefix: &str) {
         BarrierDecision::Execute
     );
     assert_eq!(
-        store.barrier(barrier).await.expect("duplicate barrier"),
+        store
+            .barrier(barrier.clone())
+            .await
+            .expect("duplicate barrier"),
         BarrierDecision::SkipDuplicate
+    );
+
+    assert!(!store
+        .delete_transaction_if_unchanged(&transaction)
+        .await
+        .expect("reject stale retention snapshot"));
+    let current = store
+        .get_transaction(&gid)
+        .await
+        .expect("read retention snapshot")
+        .expect("retention transaction exists");
+    assert!(store
+        .delete_transaction_if_unchanged(&current)
+        .await
+        .expect("delete unchanged retention snapshot"));
+    assert_eq!(
+        store.barrier(barrier).await.expect("barrier was cleaned"),
+        BarrierDecision::Execute
     );
 
     let lease_name = unique_id("recovery");

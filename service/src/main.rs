@@ -17,7 +17,7 @@ use roze_dtm::{
     validate_redis_namespace, validate_transaction_dependencies, AlertWebhookConfig, Branch,
     BranchKind, BranchStatus, BranchUrlPolicy, Dtm, DtmOptions, HttpBranchInvoker,
     InMemoryTransactionStore, KvEntry, MySqlTransactionStore, PostgresTransactionStore,
-    RedisTransactionStore, SqliteTransactionStore, Transaction, TransactionKind,
+    RedisTransactionStore, RetentionPolicy, SqliteTransactionStore, Transaction, TransactionKind,
     TransactionOptions, TransactionStatus, TransactionStore, WorkflowProgress,
     WorkflowProgressStatus,
 };
@@ -59,6 +59,14 @@ struct DtmConfig {
     recover_interval_ms: u64,
     #[serde(default = "default_recovery_lease_ttl_ms")]
     recovery_lease_ttl_ms: u64,
+    #[serde(default = "default_data_expire_seconds")]
+    data_expire_seconds: u64,
+    #[serde(default = "default_finished_data_expire_seconds")]
+    finished_data_expire_seconds: u64,
+    #[serde(default = "default_retention_interval_ms")]
+    retention_interval_ms: u64,
+    #[serde(default = "default_retention_batch_size")]
+    retention_batch_size: usize,
     #[serde(default = "default_worker_id")]
     worker_id: String,
     #[serde(default)]
@@ -84,6 +92,10 @@ impl Default for DtmConfig {
             release_revision: None,
             recover_interval_ms: default_recover_interval_ms(),
             recovery_lease_ttl_ms: default_recovery_lease_ttl_ms(),
+            data_expire_seconds: default_data_expire_seconds(),
+            finished_data_expire_seconds: default_finished_data_expire_seconds(),
+            retention_interval_ms: default_retention_interval_ms(),
+            retention_batch_size: default_retention_batch_size(),
             worker_id: default_worker_id(),
             allowed_branch_origins: Vec::new(),
             alert_webhook_url: None,
@@ -144,6 +156,11 @@ impl DtmConfig {
             "application.dtm.recovery_lease_ttl_ms must be at least twice recover_interval_ms and at most 86400000"
         );
         anyhow::ensure!(
+            (1_000..=86_400_000).contains(&self.retention_interval_ms),
+            "application.dtm.retention_interval_ms must be between 1000 and 86400000"
+        );
+        self.retention_policy()?;
+        anyhow::ensure!(
             !self.worker_id.trim().is_empty() && self.worker_id.len() <= 128,
             "application.dtm.worker_id must contain between 1 and 128 bytes"
         );
@@ -183,6 +200,22 @@ impl DtmConfig {
             branch_call_timeout_millis: self.branch_call_timeout_ms,
             transaction_timeout_millis: self.transaction_timeout_ms,
         }
+    }
+
+    fn retention_policy(&self) -> anyhow::Result<RetentionPolicy> {
+        RetentionPolicy {
+            data_expire_millis: self
+                .data_expire_seconds
+                .checked_mul(1_000)
+                .context("application.dtm.data_expire_seconds is too large")?,
+            finished_data_expire_millis: self
+                .finished_data_expire_seconds
+                .checked_mul(1_000)
+                .context("application.dtm.finished_data_expire_seconds is too large")?,
+            batch_size: self.retention_batch_size,
+        }
+        .validate()
+        .context("application.dtm retention configuration is invalid")
     }
 
     fn alert_webhook_config(&self) -> anyhow::Result<Option<AlertWebhookConfig>> {
@@ -804,6 +837,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mut group = ServiceGroup::new();
     let recovery_dtm = Arc::clone(&dtm);
+    let retention_dtm = Arc::clone(&dtm);
+    let retention_policy = config.application.dtm.retention_policy()?;
+    let retention_interval = Duration::from_millis(config.application.dtm.retention_interval_ms);
     let state = ControlState {
         dtm,
         branch_url_policy,
@@ -897,6 +933,7 @@ async fn main() -> anyhow::Result<()> {
     let recovery_lease_ttl_ms = config.application.dtm.recovery_lease_ttl_ms;
     let recovery_worker_id = config.application.dtm.worker_id.clone();
     let recovery_audit_history = Arc::clone(&state.audit_history);
+    let retention_audit_history = Arc::clone(&state.audit_history);
     group.add_fn("dtm-recovery", move |shutdown| {
         let dtm = Arc::clone(&recovery_dtm);
         let worker_id = recovery_worker_id.clone();
@@ -961,6 +998,77 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!(
                 event = "dtm.recovery.stopped",
                 "DTM recovery worker stopped"
+            );
+            Ok(())
+        }
+    });
+    group.add_fn("dtm-retention", move |shutdown| {
+        let dtm = Arc::clone(&retention_dtm);
+        let audit_history = Arc::clone(&retention_audit_history);
+        async move {
+            let mut ticker = tokio::time::interval(retention_interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = shutdown.clone().wait() => break,
+                    _ = ticker.tick() => {
+                        match dtm.purge_expired_transactions(retention_policy).await {
+                            Ok(report) if report.eligible > 0 => {
+                                DTM_METRICS.inc_counter(
+                                    "roze_dtm_retention_deleted_total",
+                                    roze_metrics::MetricLabels::new(),
+                                    report.deleted as u64,
+                                );
+                                DTM_METRICS.inc_counter(
+                                    "roze_dtm_retention_conflicts_total",
+                                    roze_metrics::MetricLabels::new(),
+                                    report.conflicts as u64,
+                                );
+                                tracing::info!(
+                                    event = "dtm.retention.completed",
+                                    scanned_count = report.scanned,
+                                    eligible_count = report.eligible,
+                                    deleted_count = report.deleted,
+                                    conflict_count = report.conflicts,
+                                    "DTM retention worker completed a bounded cleanup batch"
+                                );
+                                roze_log::audit_info!(
+                                    event = "dtm.retention.completed",
+                                    actor_kind = "retention_worker",
+                                    operation = "purge_expired",
+                                    outcome = "success",
+                                    transaction_count = report.deleted,
+                                    conflict_count = report.conflicts,
+                                    "DTM retention worker completed a bounded cleanup batch"
+                                );
+                                audit_history.record(
+                                    "dtm.retention.completed",
+                                    "success",
+                                    None,
+                                    None,
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(_) => {
+                                tracing::error!(
+                                    event = "dtm.retention.failed",
+                                    error_kind = "retention_tick_failed",
+                                    "DTM retention tick failed"
+                                );
+                                audit_history.record(
+                                    "dtm.retention.failed",
+                                    "failed",
+                                    None,
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            tracing::info!(
+                event = "dtm.retention.stopped",
+                "DTM retention worker stopped"
             );
             Ok(())
         }
@@ -3511,6 +3619,18 @@ const fn default_recover_interval_ms() -> u64 {
 }
 const fn default_recovery_lease_ttl_ms() -> u64 {
     5_000
+}
+const fn default_data_expire_seconds() -> u64 {
+    604_800
+}
+const fn default_finished_data_expire_seconds() -> u64 {
+    86_400
+}
+const fn default_retention_interval_ms() -> u64 {
+    60_000
+}
+const fn default_retention_batch_size() -> usize {
+    256
 }
 fn default_worker_id() -> String {
     "roze-dtm-local".to_string()
