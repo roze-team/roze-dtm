@@ -4291,32 +4291,43 @@ where
         tx.status = TransactionStatus::Aborting;
         for branch in &mut tx.branches {
             let barrier = BranchBarrier::new(&tx.gid, &branch.id, "cancel");
-            match self.store.barrier(barrier.clone()).await? {
-                BarrierDecision::Execute => {
-                    let cancel = branch
-                        .cancel
-                        .clone()
-                        .or(branch.compensate.clone())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("missing cancel action for branch {}", branch.id)
-                        })?;
-                    branch.attempts = branch.attempts.saturating_add(1);
-                    match self
-                        .invoke_url(&execution_options, &tx.gid, tx.status, branch, &cancel)
-                        .await
-                    {
-                        Ok(()) => {
-                            branch.status = BranchStatus::Skipped;
-                            branch.next_retry_millis = None;
-                        }
-                        Err(_) => {
-                            branch.status = BranchStatus::Failed;
-                            self.store.release_barrier(&barrier).await?;
-                            self.persist_transaction(&mut tx).await?;
-                            return Ok(tx);
-                        }
+            let barrier_decision = self.store.barrier(barrier.clone()).await?;
+            let externally_executed_try = branch.action.is_empty();
+            let should_invoke_cancel = barrier_decision == BarrierDecision::Execute
+                || (externally_executed_try
+                    && barrier_decision == BarrierDecision::SkipNullCompensation);
+            if should_invoke_cancel {
+                // dtm-labs clients register TCC branches before invoking Try
+                // themselves. Such branches have no coordinator-owned Try
+                // barrier, so the business Cancel endpoint must decide whether
+                // this is a real or null compensation.
+                let cancel = branch
+                    .cancel
+                    .clone()
+                    .or(branch.compensate.clone())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("missing cancel action for branch {}", branch.id)
+                    })?;
+                branch.attempts = branch.attempts.saturating_add(1);
+                match self
+                    .invoke_url(&execution_options, &tx.gid, tx.status, branch, &cancel)
+                    .await
+                {
+                    Ok(()) => {
+                        branch.status = BranchStatus::Skipped;
+                        branch.next_retry_millis = None;
+                    }
+                    Err(_) => {
+                        branch.status = BranchStatus::Failed;
+                        self.store.release_barrier(&barrier).await?;
+                        self.persist_transaction(&mut tx).await?;
+                        return Ok(tx);
                     }
                 }
+                continue;
+            }
+            match barrier_decision {
+                BarrierDecision::Execute => unreachable!("TCC cancel execution handled above"),
                 BarrierDecision::SkipNullCompensation => {
                     branch.status = BranchStatus::Skipped;
                     branch.next_retry_millis = None;
@@ -6451,6 +6462,41 @@ mod tests {
             .await
             .expect_err("confirm must require prepared state");
         assert!(error.to_string().contains("non-replayable state"));
+    }
+
+    #[tokio::test]
+    async fn externally_executed_tcc_try_is_cancelled_without_local_try_barrier() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dtm = Dtm::with_invoker(
+            InMemoryTransactionStore::new(),
+            CountingInvoker {
+                calls: Arc::clone(&calls),
+            },
+        );
+        dtm.submit(Transaction::tcc("gid-external-try", Vec::new()))
+            .await
+            .expect("submit");
+        dtm.prepare_tcc("gid-external-try").await.expect("prepare");
+        let mut branch = Branch::tcc_try(
+            "b1",
+            "",
+            "http://account/confirm",
+            "http://account/cancel",
+            serde_json::json!({"amount": 100}),
+        );
+        branch.status = BranchStatus::Succeeded;
+        dtm.register_branch("gid-external-try", branch)
+            .await
+            .expect("register external Try");
+
+        let aborted = dtm.cancel_tcc("gid-external-try").await.expect("cancel");
+        assert_eq!(aborted.status, TransactionStatus::Aborted);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        dtm.cancel_tcc("gid-external-try")
+            .await
+            .expect("idempotent cancel");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

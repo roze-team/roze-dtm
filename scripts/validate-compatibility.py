@@ -107,6 +107,13 @@ assert PINNED_REVISION in NOTICE
 assert "BSD 3-Clause License" in NOTICE
 assert "github.com/dtm-labs/dtm v1.19.1-0.20260103134746-18146ee53baf" in GO_INTEROP_MOD
 assert PINNED_REVISION in GO_INTEROP_CLIENT
+for go_interop_evidence in [
+    "dtmcli.TccGlobalTransaction", "dtmcli.ErrFailure", '"tcc_cancel"',
+    '\\"modes\\":[\\"tcc\\",\\"saga\\",\\"message\\"]',
+]:
+    assert go_interop_evidence in GO_INTEROP_CLIENT, {
+        "missing_go_interop_evidence": go_interop_evidence
+    }
 assert "go run ." in CI_PROTOCOL
 assert "cargo run --example grpc_callback_smoke" in CI_PROTOCOL
 assert "package workflow_callback_test;" in GRPC_CALLBACK_PROTO

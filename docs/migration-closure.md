@@ -14,7 +14,7 @@
 | --- | --- | --- | --- |
 | 原 Roze 能力 | `src/lib.rs` 保留 TCC、Saga、屏障、恢复与 Memory/SQLite，并将原状态模型向后兼容扩展 | 已覆盖且为超集 | Cargo 测试、原数据升级读取与真实重启 |
 | 事务模式 | TCC、顺序/并发 DAG Saga、二阶段 Message、静态/回调 Workflow、XA 协调与 MySQL/PostgreSQL 资源管理器 | 源码与合同已覆盖 | 跨进程分支调用、崩溃点和真实数据库验证 |
-| HTTP/JSON-RPC | 21 条兼容路由、5 个 JSON-RPC 方法、上游 `dtm_result`、请求选项、管理/KV/topic 与线级查询 DTO | 协议静态收口；固定上游 Go 客户端 Saga/Message 与仓库 JS/TS SDK 已通过真实服务门禁 | 固定上游 Node 客户端及更完整官方客户端模式矩阵 |
+| HTTP/JSON-RPC | 21 条兼容路由、5 个 JSON-RPC 方法、上游 `dtm_result`、请求选项、管理/KV/topic 与线级查询 DTO | 协议静态收口；固定上游 Go 客户端 TCC 成功/失败回滚、Saga/Message 与仓库 JS/TS SDK 已通过真实服务门禁 | 固定上游 Node 客户端及 Go Workflow/XA 官方客户端矩阵 |
 | gRPC | `proto/dtmgimp.proto` 的 9 个 RPC、消息和字段号与固定上游一致，服务端与 Rust 客户端均有对应入口 | 协议静态收口 | protobuf 生成、编译和真实 gRPC 互操作 |
 | 存储 | Memory、SQLite、PostgreSQL、MySQL、Redis standalone/Cluster；事务、动态分支、Workflow、KV/topic、屏障、revision CAS、恢复 lease/fence，以及 DataExpire/FinishedDataExpire 有界 CAS 清理 | 源码覆盖核心语义；Redis MOVED/ASK、主从切换和旧主重启已通过 CI | 五后端升级读取、网络分区与 fencing 故障注入 |
 | 客户端 | Rust HTTP/gRPC 与 TypeScript/JavaScript 原生和兼容客户端；XA、callback Workflow、topic/KV 与管理操作 | 源码、严格 `tsc` 类型检查、JS/TS 运行时、固定上游 Go 客户端及 Rust gRPC 已通过跨进程真实服务验收 | 固定上游 Node 客户端及 TLS 互操作 |
@@ -43,7 +43,7 @@
 
 以下事项不能用更多源码声明或一次短时 smoke 替代：
 
-1. 在已通过的固定 dtm-labs Go Saga/Message、Rust gRPC、JavaScript/TypeScript SDK 严格类型检查与运行时、HTTP/JSON-RPC/gRPC callback 错误码、可信 `grpcs://` TLS、gRPC deadline/全局超时和终态竞争基础上，补固定上游 Node 客户端、更多官方客户端模式与更广的超时组合。
+1. 在已通过的固定 dtm-labs Go TCC 成功/失败回滚、Saga/Message、Rust gRPC、JavaScript/TypeScript SDK 严格类型检查与运行时、HTTP/JSON-RPC/gRPC callback 错误码、可信 `grpcs://` TLS、gRPC deadline/全局超时和终态竞争基础上，补固定上游 Node 客户端、Go Workflow/XA 官方客户端矩阵与更广的超时组合。
 2. 在已通过的 PostgreSQL/MySQL/Redis CI 矩阵之上，继续覆盖 Redis 网络分区、关系型存储升级读取和多 worker 接管。
 3. XA 在 Prepare 前后、分支注册后、全局决策后发生数据库容器/业务进程硬崩溃或网络超时的恢复。
 4. 真实 HTTPS 告警接收端、重定向拒绝、进程重启、持久审计 sink 和 Dashboard 暗色模式端到端。
