@@ -1054,6 +1054,59 @@ mod tests {
         format!("{prefix}_{}_{nanos}", std::process::id())
     }
 
+    fn cluster_urls() -> Vec<String> {
+        std::env::var("ROZE_TEST_REDIS_CLUSTER_URLS")
+            .expect("ROZE_TEST_REDIS_CLUSTER_URLS is required")
+            .split(',')
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    fn cluster_namespace() -> String {
+        std::env::var("ROZE_TEST_REDIS_NAMESPACE")
+            .unwrap_or_else(|_| test_namespace("cluster_test"))
+    }
+
+    async fn cluster_admin_connection(url: &str) -> RedisConnection {
+        RedisClient::open(url)
+            .expect("open Redis Cluster admin client")
+            .connection()
+            .await
+            .expect("connect Redis Cluster admin client")
+    }
+
+    async fn set_cluster_slot(url: &str, slot: u16, state: &str, node_id: Option<&str>) {
+        let mut connection = cluster_admin_connection(url).await;
+        let mut command = redis::cmd("CLUSTER");
+        command.arg("SETSLOT").arg(slot).arg(state);
+        if let Some(node_id) = node_id {
+            command.arg(node_id);
+        }
+        let response: String = command
+            .query_async(&mut connection)
+            .await
+            .expect("set Redis Cluster slot state");
+        assert_eq!(response, "OK");
+    }
+
+    async fn assign_cluster_slot(
+        master_urls: &[String],
+        first_url: &str,
+        last_url: &str,
+        slot: u16,
+        node_id: &str,
+    ) {
+        set_cluster_slot(first_url, slot, "NODE", Some(node_id)).await;
+        for url in master_urls {
+            if url != first_url && url != last_url {
+                set_cluster_slot(url, slot, "NODE", Some(node_id)).await;
+            }
+        }
+        set_cluster_slot(last_url, slot, "NODE", Some(node_id)).await;
+    }
+
     #[test]
     fn redis_keys_share_one_explicit_cluster_hash_tag() {
         let store = RedisTransactionStore::open("redis://127.0.0.1/", "orders-prod")
@@ -1249,14 +1302,8 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires ROZE_TEST_REDIS_CLUSTER_URLS"]
     async fn redis_cluster_store_round_trip_against_real_service() {
-        let cluster_urls = std::env::var("ROZE_TEST_REDIS_CLUSTER_URLS")
-            .expect("ROZE_TEST_REDIS_CLUSTER_URLS is required")
-            .split(',')
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
-        let namespace = test_namespace("cluster_test");
+        let cluster_urls = cluster_urls();
+        let namespace = cluster_namespace();
         let store = RedisTransactionStore::open_topology("", &cluster_urls, &namespace)
             .expect("open Redis Cluster store");
         store
@@ -1274,7 +1321,7 @@ mod tests {
                 .get_transaction(&transaction.gid)
                 .await
                 .expect("read Cluster transaction"),
-            Some(transaction)
+            Some(transaction.clone())
         );
         assert_eq!(
             store
@@ -1283,5 +1330,94 @@ mod tests {
                 .expect("create Cluster barrier"),
             BarrierDecision::Execute
         );
+        let snapshot = store
+            .get_transaction(&transaction.gid)
+            .await
+            .expect("read Cluster transaction for cleanup")
+            .expect("Cluster transaction exists for cleanup");
+        assert!(store
+            .delete_transaction_if_unchanged(&snapshot)
+            .await
+            .expect("clean Cluster transaction"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a disposable Redis Cluster and ROZE_TEST_REDIS_CLUSTER_FAULT_* variables"]
+    async fn redis_cluster_handles_ask_and_moved_redirections() {
+        let cluster_urls = cluster_urls();
+        let namespace = cluster_namespace();
+        let source_url = std::env::var("ROZE_TEST_REDIS_CLUSTER_FAULT_SOURCE_URL")
+            .expect("ROZE_TEST_REDIS_CLUSTER_FAULT_SOURCE_URL is required");
+        let target_url = std::env::var("ROZE_TEST_REDIS_CLUSTER_FAULT_TARGET_URL")
+            .expect("ROZE_TEST_REDIS_CLUSTER_FAULT_TARGET_URL is required");
+        let source_id = std::env::var("ROZE_TEST_REDIS_CLUSTER_FAULT_SOURCE_ID")
+            .expect("ROZE_TEST_REDIS_CLUSTER_FAULT_SOURCE_ID is required");
+        let target_id = std::env::var("ROZE_TEST_REDIS_CLUSTER_FAULT_TARGET_ID")
+            .expect("ROZE_TEST_REDIS_CLUSTER_FAULT_TARGET_ID is required");
+        let slot = std::env::var("ROZE_TEST_REDIS_CLUSTER_FAULT_SLOT")
+            .expect("ROZE_TEST_REDIS_CLUSTER_FAULT_SLOT is required")
+            .parse::<u16>()
+            .expect("fault slot is a u16");
+        let master_urls = std::env::var("ROZE_TEST_REDIS_CLUSTER_MASTER_URLS")
+            .expect("ROZE_TEST_REDIS_CLUSTER_MASTER_URLS is required")
+            .split(',')
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        assert!(master_urls.len() >= 3, "fault test requires three masters");
+
+        let store = RedisTransactionStore::open_topology("", &cluster_urls, &namespace)
+            .expect("open Redis Cluster fault-test store");
+        let mut routed = store
+            .connection()
+            .await
+            .expect("establish routing table before slot changes");
+        let ask_key = format!("roze-dtm:{{{namespace}}}:ask-probe");
+        let moved_key = format!("roze-dtm:{{{namespace}}}:moved-probe");
+
+        set_cluster_slot(&target_url, slot, "IMPORTING", Some(&source_id)).await;
+        set_cluster_slot(&source_url, slot, "MIGRATING", Some(&target_id)).await;
+        let response: String = redis::cmd("SET")
+            .arg(&ask_key)
+            .arg("ask-ok")
+            .query_async(&mut routed)
+            .await
+            .expect("follow Redis ASK redirection");
+        assert_eq!(response, "OK");
+        let value: String = redis::cmd("GET")
+            .arg(&ask_key)
+            .query_async(&mut routed)
+            .await
+            .expect("read through Redis ASK redirection");
+        assert_eq!(value, "ask-ok");
+        let _: i64 = redis::cmd("DEL")
+            .arg(&ask_key)
+            .query_async(&mut routed)
+            .await
+            .expect("clean Redis ASK probe");
+        set_cluster_slot(&source_url, slot, "STABLE", None).await;
+        set_cluster_slot(&target_url, slot, "STABLE", None).await;
+
+        assign_cluster_slot(&master_urls, &target_url, &source_url, slot, &target_id).await;
+        let response: String = redis::cmd("SET")
+            .arg(&moved_key)
+            .arg("moved-ok")
+            .query_async(&mut routed)
+            .await
+            .expect("follow Redis MOVED redirection");
+        assert_eq!(response, "OK");
+        let value: String = redis::cmd("GET")
+            .arg(&moved_key)
+            .query_async(&mut routed)
+            .await
+            .expect("read after Redis MOVED redirection");
+        assert_eq!(value, "moved-ok");
+        let _: i64 = redis::cmd("DEL")
+            .arg(&moved_key)
+            .query_async(&mut routed)
+            .await
+            .expect("clean Redis MOVED probe");
+        assign_cluster_slot(&master_urls, &source_url, &target_url, slot, &source_id).await;
     }
 }

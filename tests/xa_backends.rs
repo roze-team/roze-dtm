@@ -119,6 +119,8 @@ async fn mysql_xa_resource_manager_round_trip() {
     let registration = registration.join().expect("join MySQL registration server");
     assert!(registration.contains("/api/dtmsvr/registerXaBranch"));
     assert!(registration.contains(&commit_id));
+    drop(manager);
+    let manager = MySqlXaResourceManager::new(pool.clone());
     assert!(manager
         .recover_prepared()
         .await
@@ -137,6 +139,13 @@ async fn mysql_xa_resource_manager_round_trip() {
         .expect("commit MySQL XA branch");
     assert_eq!(resolved.outcome, XaPhase2Outcome::Applied);
     assert_eq!(resolved.record.status, XaHeuristicStatus::Applied);
+    assert_eq!(
+        manager
+            .resolve(&commit_branch, XaPhase2::Commit)
+            .await
+            .expect("treat unknown MySQL XID as already resolved"),
+        XaPhase2Outcome::AlreadyResolved
+    );
     assert_eq!(
         manager
             .resolve_heuristically(&commit_branch, &decision)
@@ -262,6 +271,8 @@ async fn postgres_xa_resource_manager_round_trip() {
         .expect("join PostgreSQL registration server");
     assert!(registration.contains("/api/dtmsvr/registerXaBranch"));
     assert!(registration.contains(&commit_id));
+    drop(manager);
+    let manager = PostgresXaResourceManager::new(pool.clone());
     assert!(manager
         .recover_prepared()
         .await
@@ -280,6 +291,13 @@ async fn postgres_xa_resource_manager_round_trip() {
         .expect("commit PostgreSQL XA branch");
     assert_eq!(resolved.outcome, XaPhase2Outcome::Applied);
     assert_eq!(resolved.record.status, XaHeuristicStatus::Applied);
+    assert_eq!(
+        manager
+            .resolve(&commit_branch, XaPhase2::Commit)
+            .await
+            .expect("treat unknown PostgreSQL XID as already resolved"),
+        XaPhase2Outcome::AlreadyResolved
+    );
     assert_eq!(
         manager
             .resolve_heuristically(&commit_branch, &decision)

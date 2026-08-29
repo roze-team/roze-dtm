@@ -49,7 +49,8 @@ jobs:
       ROZE_DTM_TEST_POSTGRES_URL: postgres://roze:roze-test@127.0.0.1:5432/roze_dtm
       ROZE_DTM_TEST_MYSQL_URL: mysql://roze:roze-test@127.0.0.1:3306/roze_dtm
       ROZE_TEST_REDIS_URL: redis://127.0.0.1:6379
-      ROZE_TEST_REDIS_CLUSTER_URLS: redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002
+      ROZE_TEST_REDIS_CLUSTER_URLS: redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002,redis://127.0.0.1:7003,redis://127.0.0.1:7004,redis://127.0.0.1:7005
+      ROZE_TEST_REDIS_NAMESPACE: ci_cluster_faults
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -77,10 +78,10 @@ jobs:
             -e "GRANT XA_RECOVER_ADMIN ON *.* TO 'roze'@'%';"
       - name: Start Redis Cluster
         run: |
-          for port in 7000 7001 7002; do
+          for port in 7000 7001 7002 7003 7004 7005; do
             docker run --detach --name "roze-dtm-redis-$port" --network host redis:7.4 \
               redis-server --port "$port" --cluster-enabled yes \
-              --cluster-config-file nodes.conf --cluster-node-timeout 5000 \
+              --cluster-config-file nodes.conf --cluster-node-timeout 2000 \
               --appendonly no --protected-mode no
           done
           for attempt in $(seq 1 30); do
@@ -92,16 +93,86 @@ jobs:
           done
           docker run --rm --network host redis:7.4 redis-cli --cluster create \
             127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 \
-            --cluster-replicas 0 --cluster-yes
+            127.0.0.1:7003 127.0.0.1:7004 127.0.0.1:7005 \
+            --cluster-replicas 1 --cluster-yes
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Lint
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Dependency policy
         run: cargo deny check
+      - name: Static protocol, Dashboard, and evidence gates
+        run: |
+          python -m py_compile scripts/*.py
+          for script in scripts/*.mjs; do node --check "$script"; done
+          python scripts/validate-openapi.py
+          python scripts/validate-dashboard.py
+          python scripts/validate-compatibility.py
+          python scripts/validate-migration-closure.py
       - name: Test
         run: cargo test --workspace
       - name: Redis integration
         run: cargo test -p roze-dtm redis_store_round_trip_against_real_service -- --ignored --nocapture
       - name: Redis Cluster integration
+        run: cargo test -p roze-dtm redis_cluster_store_round_trip_against_real_service -- --ignored --nocapture
+      - name: Resolve Redis Cluster fault targets
+        run: |
+          redis_cli() { docker run --rm --network host redis:7.4 redis-cli "$@"; }
+          slot="$(redis_cli -p 7000 CLUSTER KEYSLOT 'roze-dtm:{ci_cluster_faults}:transactions')"
+          slots_json="$(redis_cli --json -p 7000 CLUSTER SLOTS)"
+          source_port="$(jq -r --argjson slot "$slot" '.[] | select(.[0] <= $slot and .[1] >= $slot) | .[2][1]' <<<"$slots_json")"
+          mapfile -t master_ports < <(jq -r '.[] | .[2][1]' <<<"$slots_json" | sort -n -u)
+          test "${#master_ports[@]}" -eq 3
+          target_port="$(printf '%s\n' "${master_ports[@]}" | grep -v "^${source_port}$" | head -n 1)"
+          source_id="$(redis_cli -p "$source_port" CLUSTER MYID)"
+          target_id="$(redis_cli -p "$target_port" CLUSTER MYID)"
+          master_urls="$(printf 'redis://127.0.0.1:%s,' "${master_ports[@]}")"
+          {
+            echo "ROZE_TEST_REDIS_CLUSTER_FAULT_SLOT=$slot"
+            echo "ROZE_TEST_REDIS_CLUSTER_FAULT_SOURCE_PORT=$source_port"
+            echo "ROZE_TEST_REDIS_CLUSTER_FAULT_TARGET_PORT=$target_port"
+            echo "ROZE_TEST_REDIS_CLUSTER_FAULT_SOURCE_URL=redis://127.0.0.1:$source_port"
+            echo "ROZE_TEST_REDIS_CLUSTER_FAULT_TARGET_URL=redis://127.0.0.1:$target_port"
+            echo "ROZE_TEST_REDIS_CLUSTER_FAULT_SOURCE_ID=$source_id"
+            echo "ROZE_TEST_REDIS_CLUSTER_FAULT_TARGET_ID=$target_id"
+            echo "ROZE_TEST_REDIS_CLUSTER_MASTER_URLS=${master_urls%,}"
+          } >> "$GITHUB_ENV"
+      - name: Redis Cluster ASK and MOVED redirections
+        run: cargo test -p roze-dtm redis_cluster_handles_ask_and_moved_redirections -- --ignored --nocapture
+      - name: Stop Redis Cluster slot owner and await replica promotion
+        run: |
+          docker stop "roze-dtm-redis-$ROZE_TEST_REDIS_CLUSTER_FAULT_SOURCE_PORT"
+          for attempt in $(seq 1 45); do
+            slots_json="$(docker run --rm --network host redis:7.4 redis-cli --json \
+              -p "$ROZE_TEST_REDIS_CLUSTER_FAULT_TARGET_PORT" CLUSTER SLOTS 2>/dev/null || true)"
+            owner_port="$(jq -r --argjson slot "$ROZE_TEST_REDIS_CLUSTER_FAULT_SLOT" \
+              '.[] | select(.[0] <= $slot and .[1] >= $slot) | .[2][1]' <<<"$slots_json" 2>/dev/null || true)"
+            cluster_state="$(docker run --rm --network host redis:7.4 redis-cli \
+              -p "$ROZE_TEST_REDIS_CLUSTER_FAULT_TARGET_PORT" CLUSTER INFO 2>/dev/null \
+              | tr -d '\r' | grep '^cluster_state:' || true)"
+            if [[ "$owner_port" != "$ROZE_TEST_REDIS_CLUSTER_FAULT_SOURCE_PORT" \
+              && "$owner_port" =~ ^[0-9]+$ && "$cluster_state" == "cluster_state:ok" ]]; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+      - name: Redis Cluster integration after primary failover
+        run: cargo test -p roze-dtm redis_cluster_store_round_trip_against_real_service -- --ignored --nocapture
+      - name: Restart old Redis primary and await cluster recovery
+        run: |
+          docker restart "roze-dtm-redis-$ROZE_TEST_REDIS_CLUSTER_FAULT_SOURCE_PORT"
+          for attempt in $(seq 1 45); do
+            ping="$(docker run --rm --network host redis:7.4 redis-cli \
+              -p "$ROZE_TEST_REDIS_CLUSTER_FAULT_SOURCE_PORT" PING 2>/dev/null || true)"
+            cluster_state="$(docker run --rm --network host redis:7.4 redis-cli \
+              -p "$ROZE_TEST_REDIS_CLUSTER_FAULT_TARGET_PORT" CLUSTER INFO 2>/dev/null \
+              | tr -d '\r' | grep '^cluster_state:' || true)"
+            if [[ "$ping" == "PONG" && "$cluster_state" == "cluster_state:ok" ]]; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+      - name: Redis Cluster integration after old-primary restart
         run: cargo test -p roze-dtm redis_cluster_store_round_trip_against_real_service -- --ignored --nocapture

@@ -28,7 +28,7 @@ bash scripts/redis-integration.sh
 - 普通控制面写入与恢复写入并发时，stale transaction revision 被拒绝且动态分支不会被静默覆盖。
 - Cluster MOVED/ASK、节点重启、主从切换、断连恢复及同槽脚本行为。
 
-当前状态：服务端时间 + epoch 租约、恢复 fenced store、事务 revision/payload CAS、Workflow/屏障 fenced Lua、事务级屏障清理索引和 ignored integration tests 已加入源码；workspace 编译、单元测试和 Clippy 已在本地通过。CI 已启动 Redis standalone 与三节点 Cluster并通过两组真实集成测试，真实 Redis 测试同时覆盖保留 compare-and-delete 及屏障索引清理；MOVED/ASK、节点重启、主从切换、网络分区和长时间运行仍为 `inconclusive`。
+当前状态：服务端时间 + epoch 租约、恢复 fenced store、事务 revision/payload CAS、Workflow/屏障 fenced Lua、事务级屏障清理索引和 ignored integration tests 已加入源码；workspace 编译、单元测试和 Clippy 已在本地通过。CI 已从无副本三节点拓扑扩展为三主三从：使用迁移槽上的新 key 触发 ASK，使用同一已建 Cluster 连接在槽所有权改变后触发 MOVED，再停止实际槽 owner、等待副本提升、执行事务往返、重启旧主节点并再次执行往返。该故障矩阵是否通过以对应 revision 的 CI run 为准；网络分区和长时间运行仍为 `inconclusive`。
 
 ## 协议互操作
 
@@ -44,13 +44,25 @@ HTTP、JSON-RPC 和 gRPC 兼容协议需要使用固定上游客户端版本执�
 
 `scripts/production-http-contract-smoke.mjs` 可对已运行的生产候选执行 12 项只读检查：三类探针、指标、OpenAPI、未授权拒绝、授权统计、Dashboard 脱敏、XA 对账、部署修订号、dtm-labs HTTP 和 JSON-RPC。运行必须绑定完整 Git revision 和显式部署拓扑；服务端 `/api/dtmsvr/version` 返回的 `release_revision` 必须与 `ROZE_DTM_EXPECTED_REVISION` 完全一致。脚本会将 OpenAPI/指标快照及检查结果写入证据目录。`scripts/validate-production-evidence.py` 独立校验时间范围、拓扑、判定一致性、检查项唯一性、相对工件路径、字节数与 SHA-256；通过烟测仍只证明该次短时 HTTP 合同，不替代数据库故障注入或 24h/72h soak。
 
+`scripts/production-soak.mjs` 周期执行上述合同检查并保存每次指标/OpenAPI 快照、报告路径和 SHA-256，最终生成 `soak-report.json`。运行时沿用 HTTP smoke 的必填变量，并额外设置 profile；故障时间线可以通过 `ROZE_DTM_FAULT_TIMELINE_JSON` 指向 JSON 数组。示例：
+
+```bash
+ROZE_DTM_SOAK_PROFILE=24h \
+ROZE_DTM_SOAK_INTERVAL_SECONDS=300 \
+ROZE_DTM_EVIDENCE_DIR=/secure/evidence/roze-dtm-24h \
+node scripts/production-soak.mjs
+python scripts/validate-soak-evidence.py /secure/evidence/roze-dtm-24h/soak-report.json
+```
+
+`smoke` profile 默认只运行 60 秒并标记为 `harness_only`；它不能获得 24h/72h 资格。校验器要求长稳报告的实际单调时钟持续时间达到 86400/259200 秒，逐个复验子报告及其工件哈希，并拒绝中断、缺失样本、revision 不一致或超出错误预算的报告。
+
 指标 smoke 还要求 `roze_dtm_metrics_registry_available 1` 存在。生产验收必须在创建、推进、失败、重试和终态后核对 `roze_dtm_transaction_transitions_total`、`roze_dtm_branch_state_observations_total` 与 `roze_dtm_retry_scheduled_observations_total` 的单调变化；将测试事务时间推进到配置保留边界后，还要核对 `roze_dtm_retention_deleted_total` / `roze_dtm_retention_conflicts_total`、协调记录与屏障的同步删除，以及扫描后并发更新不会被删除。确认抓取不触发存储全表扫描、指标中不存在 GID、branch id、URL、payload、Header、控制令牌或错误正文；静态源码测试不能替代该运行验证。
 
 ## XA Resource Manager
 
 MySQL 验证必须启用 InnoDB，并为执行恢复扫描的受限资源管理账户授予全局动态权限 `XA_RECOVER_ADMIN`；该账户不应获得 root 或无关的全局写权限。测试要覆盖 XA START 之后、分支注册之后、XA PREPARE 之后和全局决策之后的进程中断；PostgreSQL 必须配置非零 `max_prepared_transactions` 并覆盖相同崩溃点。两种数据库都要验证 `roze_xa_barriers` 原子去重、重复 Commit/Rollback、`recover_prepared` 对账、注册失败回滚、网络超时重试、未知 XID，以及协调器追加的 `gid/trans_type/branch_id/op` 不可被 phase-2 URL 原查询参数覆盖。人工 Commit/Rollback 必须验证 `roze_xa_decisions` 的 intent-first 写入、decision id 幂等与冲突拒绝、失败后重试、终态复用、`reconcile` 双向差集，以及原因不进入日志、指标或 Dashboard。
 
-当前状态：MySQL/PostgreSQL 资源管理器、固定 XID 校验、屏障与启发式决策 DDL、intent-first 决策持久化、prepared transaction 双向对账和 phase-2 参数覆盖已加入，并通过本地编译、单元测试与 Clippy。`tests/xa_backends.rs` 已在两种真实数据库通过 Prepare、Commit、Rollback、屏障去重、prepared 扫描、启发式 decision id 幂等与对账；CI 同时验证 PostgreSQL prepared transactions 和 MySQL `XA_RECOVER_ADMIN` 最小权限拓扑。进程崩溃点、网络超时和未知 XID 故障注入仍为 `inconclusive`。
+当前状态：MySQL/PostgreSQL 资源管理器、固定 XID 校验、屏障与启发式决策 DDL、intent-first 决策持久化、prepared transaction 双向对账和 phase-2 参数覆盖已加入，并通过本地编译、单元测试与 Clippy。`tests/xa_backends.rs` 在 Prepare 后丢弃原资源管理器对象，从同一数据库池重建 manager，再执行 prepared 扫描和 Commit；Commit 后直接重放 phase-2，以数据库 unknown XID 响应验证 `AlreadyResolved`。两种数据库的 Prepare、Commit、Rollback、屏障去重、启发式 decision id 幂等与对账，以及 PostgreSQL prepared transactions 和 MySQL `XA_RECOVER_ADMIN` 最小权限拓扑均由 CI 执行。数据库容器/业务进程硬崩溃点和网络超时仍为 `inconclusive`。
 
 ## Dashboard
 
