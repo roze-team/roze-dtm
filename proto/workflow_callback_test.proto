@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package workflow_callback_test;
+
+// Test-only callback contract used by the cross-process production gate. It
+// is intentionally separate from the pinned dtmgimp public protocol.
+service Workflow {
+  rpc Query(WorkflowData) returns (Empty) {}
+  rpc Timeout(WorkflowData) returns (Empty) {}
+}
+
+message WorkflowData {
+  bytes data = 1;
+}
+
+message Empty {}

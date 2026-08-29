@@ -3,6 +3,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::env::set_var("PROTOC", protoc);
 
     println!("cargo:rerun-if-changed=proto/dtmgimp.proto");
-    roze_grpc::build::compile(&["proto/dtmgimp.proto"], &["proto"])?;
+    println!("cargo:rerun-if-changed=proto/workflow_callback_test.proto");
+    roze_grpc::build::compile(
+        &["proto/dtmgimp.proto", "proto/workflow_callback_test.proto"],
+        &["proto"],
+    )?;
     Ok(())
 }

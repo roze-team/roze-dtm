@@ -70,3 +70,6 @@ roze-transaction.workspace = true
 [build-dependencies]
 protoc-bin-vendored.workspace = true
 roze-grpc.workspace = true
+
+[dev-dependencies]
+tonic = { workspace = true, features = ["router"] }

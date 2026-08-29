@@ -45,3 +45,4 @@ node scripts/sdk-protocol-integration.mjs
 node --experimental-transform-types scripts/sdk-typescript-integration.ts
 (cd interop/dtm-labs-go && go run .)
 cargo run --example grpc_smoke
+cargo run --example grpc_callback_smoke

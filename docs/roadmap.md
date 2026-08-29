@@ -12,11 +12,11 @@
 | 高可用恢复 | 已支持 | 持久化租约保证同一时刻只有一个恢复 worker 推进事务 |
 | 控制面 | 已支持 | Roze HTTP、数字响应信封、鉴权、健康检查、HTTP/RPC 与低基数 DTM 业务指标、审计事件 |
 | 重试告警 | 已支持核心 | dtm-labs AlertWebHook 负载、顺序/并发失败阈值、超时与脱敏；真实 HTTPS 故障矩阵待补 |
-| DTM HTTP/JSON-RPC/gRPC 兼容 | 已支持核心 | 9 个 gRPC 方法、逐事务 timeout/retry/Header 及 WaitResult 异步调度；真实 Rust gRPC、固定上游 Go Saga/Message、仓库 JS/TS SDK 与 HTTP/JSON-RPC callback 错误矩阵已通过，Node/TLS/完整超时矩阵待补 |
+| DTM HTTP/JSON-RPC/gRPC 兼容 | 已支持核心 | 9 个 gRPC 方法、逐事务 timeout/retry/Header 及 WaitResult 异步调度；真实 Rust gRPC、固定上游 Go Saga/Message、仓库 JS/TS SDK 与 HTTP/JSON-RPC/gRPC callback 错误矩阵及 gRPC 超时已通过，Node/TLS/更广超时组合待补 |
 | XA | 已支持核心 | 协调生命周期、动态分支、可信 phase-2 参数、MySQL/PostgreSQL Rust 资源管理器、启发式决策与 prepared 对账已通过真实数据库 CI；崩溃恢复矩阵待补 |
 | 二阶段消息 | 已支持核心 | Prepared/Dispatch/Abort、顺序/并发投递、部分失败精确重试、持久化延迟投递、上游顶层 `concurrent` 与 `custom_data.delay`，并复用 `roze-transaction` Outbox/Inbox 与 `roze-mq`；真实重启跨投递点验证待补 |
 | Topic/KV | 已支持核心 | 通用版本化 KV、订阅增删查、HTTP 兼容端点与 `topic://` 消息分支展开 |
-| Workflow DSL | 已支持核心 | 静态依赖图、恢复和逆序补偿；callback Workflow 支持复合进度、终态及 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复，HTTP/JSON-RPC 错误码和终态竞争已通过真实服务门禁，gRPC/TLS 错误矩阵待验证 |
+| Workflow DSL | 已支持核心 | 静态依赖图、恢复和逆序补偿；callback Workflow 支持复合进度、终态及 HTTP/JSON-RPC/gRPC QueryPrepared 主动恢复，三协议错误码、gRPC deadline/超时终态和终态竞争已通过真实服务门禁，TLS 待验证 |
 | Redis 存储 | 已支持核心 | Roze topology、revision CAS/屏障、事务级屏障清理索引、服务端时间 + epoch 租约、恢复写入 fencing、KV/topic 已通过 standalone/三主三从 Cluster CI；MOVED/ASK、主从切换及旧主重启已通过，网络分区证据待补 |
 | SDK | 已支持 Web 范围 | 已提供 Rust HTTP/gRPC client，以及 TypeScript/JavaScript `/v1` 与 dtm-labs HTTP/JSON-RPC 兼容客户端；JS/TS 运行时和固定上游 Go 客户端已纳入真实服务 CI |
 | OpenAPI | 已支持 | OpenAPI 3.1 覆盖全部 54 条 HTTP 路径，支持自由 JSON payload、Bearer 安全声明、确定性生成和 Router 覆盖校验 |

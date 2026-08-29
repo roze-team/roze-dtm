@@ -41,7 +41,7 @@
 
 以下事项不能用更多源码声明或一次短时 smoke 替代：
 
-1. 在已通过的固定 dtm-labs Go Saga/Message、Rust gRPC、JavaScript/TypeScript SDK 严格类型检查与运行时、HTTP/JSON-RPC callback 错误码和终态竞争基础上，补固定上游 Node 客户端、更多官方客户端模式、gRPC callback 错误码、受信任 TLS 与超时矩阵。
+1. 在已通过的固定 dtm-labs Go Saga/Message、Rust gRPC、JavaScript/TypeScript SDK 严格类型检查与运行时、HTTP/JSON-RPC/gRPC callback 错误码、gRPC deadline/全局超时和终态竞争基础上，补固定上游 Node 客户端、更多官方客户端模式、受信任 TLS 与更广的超时组合。
 2. 在已通过的 PostgreSQL/MySQL/Redis CI 矩阵之上，继续覆盖 Redis 网络分区、关系型存储升级读取和多 worker 接管。
 3. XA 在 Prepare 前后、分支注册后、全局决策后发生数据库容器/业务进程硬崩溃或网络超时的恢复。
 4. 真实 HTTPS 告警接收端、重定向拒绝、进程重启、持久审计 sink 和 Dashboard 暗色模式端到端。
