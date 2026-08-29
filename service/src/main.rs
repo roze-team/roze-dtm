@@ -1,6 +1,7 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, VecDeque},
+    path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, LazyLock, Mutex,
@@ -72,6 +73,8 @@ struct DtmConfig {
     #[serde(default)]
     allowed_branch_origins: Vec<String>,
     #[serde(default)]
+    branch_tls_ca_file: Option<PathBuf>,
+    #[serde(default)]
     alert_webhook_url: Option<String>,
     #[serde(default = "default_alert_retry_limit")]
     alert_retry_limit: u32,
@@ -98,6 +101,7 @@ impl Default for DtmConfig {
             retention_batch_size: default_retention_batch_size(),
             worker_id: default_worker_id(),
             allowed_branch_origins: Vec::new(),
+            branch_tls_ca_file: None,
             alert_webhook_url: None,
             alert_retry_limit: default_alert_retry_limit(),
             alert_webhook_timeout_ms: default_alert_webhook_timeout_ms(),
@@ -176,6 +180,12 @@ impl DtmConfig {
         );
         BranchUrlPolicy::from_allowed_origins(&self.allowed_branch_origins)
             .context("application.dtm.allowed_branch_origins is invalid")?;
+        if let Some(path) = &self.branch_tls_ca_file {
+            anyhow::ensure!(
+                !path.as_os_str().is_empty(),
+                "application.dtm.branch_tls_ca_file must not be empty"
+            );
+        }
         self.alert_webhook_config()?;
         match self.store.kind {
             StoreKind::Memory => anyhow::ensure!(
@@ -235,6 +245,39 @@ impl DtmConfig {
             .validate()
             .context("application.dtm alert webhook configuration is invalid")?;
         Ok(Some(config))
+    }
+
+    fn branch_tls_ca_pem(&self) -> anyhow::Result<Option<Vec<u8>>> {
+        const MAX_CA_PEM_BYTES: u64 = 1024 * 1024;
+
+        let Some(path) = &self.branch_tls_ca_file else {
+            return Ok(None);
+        };
+        let metadata = std::fs::metadata(path).with_context(|| {
+            format!(
+                "failed to inspect application.dtm.branch_tls_ca_file {}",
+                path.display()
+            )
+        })?;
+        anyhow::ensure!(
+            metadata.is_file(),
+            "application.dtm.branch_tls_ca_file must reference a regular file"
+        );
+        anyhow::ensure!(
+            (1..=MAX_CA_PEM_BYTES).contains(&metadata.len()),
+            "application.dtm.branch_tls_ca_file must contain between 1 byte and 1 MiB"
+        );
+        let pem = std::fs::read(path).with_context(|| {
+            format!(
+                "failed to read application.dtm.branch_tls_ca_file {}",
+                path.display()
+            )
+        })?;
+        anyhow::ensure!(
+            !pem.is_empty() && pem.len() as u64 <= MAX_CA_PEM_BYTES,
+            "application.dtm.branch_tls_ca_file changed while it was being read"
+        );
+        Ok(Some(pem))
     }
 }
 
@@ -763,6 +806,7 @@ async fn main() -> anyhow::Result<()> {
     let config = roze_config::load_service_with_application::<ApplicationConfig>(&path)?;
     let production = config.profile == roze_config::ServiceProfile::Production;
     config.application.dtm.validate(production)?;
+    let branch_tls_ca_pem = config.application.dtm.branch_tls_ca_pem()?;
     let rest = config
         .rest
         .as_ref()
@@ -816,10 +860,11 @@ async fn main() -> anyhow::Result<()> {
     };
     let branch_url_policy =
         BranchUrlPolicy::from_allowed_origins(&config.application.dtm.allowed_branch_origins)?;
-    let invoker = HttpBranchInvoker::with_timeout_policy_and_alert(
+    let invoker = HttpBranchInvoker::with_timeout_policy_alert_and_tls_ca(
         Duration::from_millis(config.application.dtm.branch_call_timeout_ms),
         branch_url_policy.clone(),
         config.application.dtm.alert_webhook_config()?,
+        branch_tls_ca_pem,
     )?;
     let dtm: Arc<DtmRuntime> = Arc::new(Dtm::with_options(
         store,

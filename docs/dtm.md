@@ -25,6 +25,7 @@ application:
     allowed_branch_origins:
       - http://inventory:8080
       - http://account:8080
+    branch_tls_ca_file: /run/secrets/roze-dtm-branch-ca.pem
     store:
       kind: postgres
       database_url: env://ROZE_DTM_DATABASE_URL
@@ -44,6 +45,8 @@ application:
 Action、Confirm、Cancel、Compensate 和 callback `QueryPrepared` URL；实际调用会再次
 校验，并禁止 HTTP 重定向，避免通过分支地址或重定向访问未授权的内部端点。gRPC
 callback 使用对应的 `http://` 或 `https://` origin 加入同一白名单。
+
+`branch_tls_ca_file` 可选，指向不超过 1 MiB 的 PEM CA bundle。服务在启动时读取并解析证书，配置为空、文件不存在、不是普通文件、过大或 PEM 无证书时直接拒绝启动。该 CA 在保留系统信任根的同时用于 HTTPS 分支和 `grpcs://` callback；证书链、有效期与目标主机名仍由 rustls 严格校验，不提供 `insecure_skip_verify` 或主机名绕过。生产部署应通过只读 secret volume 提供 CA 文件，并在轮换后滚动重启实例。
 
 `alert_webhook_url` 可选，对齐 dtm-labs 的 `AlertWebHook`。任一顺序或并发分支失败达到 `alert_retry_limit`（1–10000，默认 3）后，协调器以 POST JSON 发送 `gid`、兼容状态、去除查询串的 `branch`、固定错误分类和 `retry_count`；后续失败仍会再次告警。`alert_webhook_timeout_ms` 范围为 1–120000。Webhook URL 只允许无用户凭据和 fragment 的 HTTP(S)，建议使用 `env://ROZE_DTM_ALERT_WEBHOOK_URL`；Webhook 失败不会改变事务状态或推迟原分支恢复，只记录不含 URL、GID 和依赖错误正文的有界事件。
 

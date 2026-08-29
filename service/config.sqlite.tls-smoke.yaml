@@ -1,0 +1,50 @@
+name: roze-dtm
+profile: development
+
+logging:
+  enabled: true
+  level: info
+  format: json
+  stdout: true
+  ansi: false
+  target: true
+  span_events: none
+  utc_time: true
+  non_blocking_buffer: 8192
+  lossy: false
+
+rest:
+  addr: 127.0.0.1:18090
+  register: false
+
+rpc:
+  addr: 127.0.0.1:36791
+
+governance: {}
+
+application:
+  dtm:
+    control_token: env://ROZE_DTM_CONTROL_TOKEN
+    release_revision: env://ROZE_DTM_RELEASE_REVISION
+    recover_interval_ms: 250
+    recovery_lease_ttl_ms: 1000
+    data_expire_seconds: 604800
+    finished_data_expire_seconds: 86400
+    retention_interval_ms: 60000
+    retention_batch_size: 256
+    worker_id: roze-dtm-sqlite-tls-smoke
+    allowed_branch_origins:
+      - http://127.0.0.1:18091
+      - https://localhost:18093
+    branch_tls_ca_file: env://ROZE_DTM_BRANCH_TLS_CA_FILE
+    store:
+      kind: sqlite
+      database_url: "sqlite::memory:"
+      max_connections: 1
+    max_attempts: 3
+    retry_backoff_ms: 100
+    max_retry_backoff_ms: 1000
+    branch_call_timeout_ms: 1000
+    transaction_timeout_ms: 10000
+    alert_retry_limit: 2
+    alert_webhook_timeout_ms: 1000

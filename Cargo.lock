@@ -2311,6 +2311,7 @@ dependencies = [
  "roze-redis",
  "roze-rpc",
  "roze-transaction",
+ "rustls",
  "serde",
  "serde_json",
  "sqlx",

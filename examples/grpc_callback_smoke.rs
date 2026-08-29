@@ -11,7 +11,10 @@ use roze_dtm::{
 };
 use serde_json::Value;
 use tokio::sync::oneshot;
-use tonic::{transport::Server, Request, Response, Status};
+use tonic::{
+    transport::{Identity, Server, ServerTlsConfig},
+    Request, Response, Status,
+};
 
 mod callback {
     tonic::include_proto!("workflow_callback_test");
@@ -22,9 +25,9 @@ use callback::{
     Empty, WorkflowData,
 };
 
-const CALLBACK_ENDPOINT: &str = "127.0.0.1:18092";
-const CALLBACK_TARGET: &str = "grpc://127.0.0.1:18092/workflow_callback_test.Workflow/Query";
-const TIMEOUT_TARGET: &str = "grpc://127.0.0.1:18092/workflow_callback_test.Workflow/Timeout";
+const CALLBACK_ENDPOINT: &str = "127.0.0.1:18093";
+const CALLBACK_TARGET: &str = "grpcs://localhost:18093/workflow_callback_test.Workflow/Query";
+const TIMEOUT_TARGET: &str = "grpcs://localhost:18093/workflow_callback_test.Workflow/Timeout";
 
 #[derive(Clone, Default)]
 struct CallbackService {
@@ -89,15 +92,21 @@ impl CallbackService {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("failed to install the ring TLS crypto provider"))?;
     let grpc_endpoint = std::env::var("ROZE_DTM_GRPC_ENDPOINT")
         .unwrap_or_else(|_| "http://127.0.0.1:36791".to_owned());
     let http_endpoint =
         std::env::var("ROZE_DTM_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:18090".to_owned());
     let token = std::env::var("ROZE_DTM_CONTROL_TOKEN")?;
+    let tls_cert = std::fs::read(std::env::var("ROZE_DTM_TEST_TLS_CERT_FILE")?)?;
+    let tls_key = std::fs::read(std::env::var("ROZE_DTM_TEST_TLS_KEY_FILE")?)?;
     let callback = CallbackService::default();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let callback_task = tokio::spawn(
         Server::builder()
+            .tls_config(ServerTlsConfig::new().identity(Identity::from_pem(tls_cert, tls_key)))?
             .add_service(WorkflowServer::new(callback.clone()))
             .serve_with_shutdown(CALLBACK_ENDPOINT.parse()?, async {
                 let _ = shutdown_rx.await;
@@ -170,7 +179,9 @@ async fn main() -> anyhow::Result<()> {
 
     let _ = shutdown_tx.send(());
     callback_task.await??;
-    println!("grpc callback smoke passed failed_gid={failed_gid} timeout_gid={timeout_gid}");
+    println!(
+        "trusted TLS grpc callback smoke passed failed_gid={failed_gid} timeout_gid={timeout_gid}"
+    );
     Ok(())
 }
 

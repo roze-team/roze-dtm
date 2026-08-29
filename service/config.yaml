@@ -36,6 +36,8 @@ application:
     allowed_branch_origins:
       - http://inventory
       - http://account
+    # Optional PEM CA bundle for private HTTPS/grpcs branch endpoints.
+    # branch_tls_ca_file: /run/secrets/roze-dtm-branch-ca.pem
     store:
       kind: memory
       max_connections: 10

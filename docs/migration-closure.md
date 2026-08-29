@@ -37,12 +37,13 @@
 - `tests/xa_backends.rs` 与 CI 真实依赖矩阵已覆盖并通过 PostgreSQL/MySQL XA Commit/Rollback/屏障/对账、manager 重建后 prepared 恢复、unknown XID 幂等、Redis standalone 和三主三从 Redis Cluster；MySQL 验收还固定了 `XA_RECOVER_ADMIN` 最小恢复权限。revision `20a46b92e70e94c17b0aaa9eb39e05ce88d4024e` 的 run `33239791535` 还通过了 Redis MOVED/ASK、槽 owner 停机、副本提升、切换后往返与旧主重启。
 - revision `9a9a88dc4ba8fc93c8ae1a896dbd25f80053491d` 的 CI run `33241630512` 已通过严格 TypeScript、真实 SQLite HTTP/JSON-RPC/gRPC、仓库 JS/TS SDK、固定 dtm-labs Go Saga/Message、callback 错误码与终态竞争，并重跑通过上述 PostgreSQL/MySQL/Redis 真实依赖矩阵。
 - revision `caa11df8e5f546119f902cd8835a02987885196c` 的 CI run `33243037990` 进一步通过 gRPC callback `FAILED_PRECONDITION`/`ABORTED`、metadata、二进制 payload、逐调用 deadline、恢复重试和全局超时终态，并再次通过全部真实依赖矩阵。
+- 本地完整协议矩阵已使用运行时临时私有 CA 与带 `localhost` SAN 的服务证书，通过严格 `grpcs://` 证书链/主机名校验重跑上述 gRPC callback 矩阵；等待本次 revision 的 CI 证据绑定。
 
 ## 剩余运行门槛
 
 以下事项不能用更多源码声明或一次短时 smoke 替代：
 
-1. 在已通过的固定 dtm-labs Go Saga/Message、Rust gRPC、JavaScript/TypeScript SDK 严格类型检查与运行时、HTTP/JSON-RPC/gRPC callback 错误码、gRPC deadline/全局超时和终态竞争基础上，补固定上游 Node 客户端、更多官方客户端模式、受信任 TLS 与更广的超时组合。
+1. 在已通过的固定 dtm-labs Go Saga/Message、Rust gRPC、JavaScript/TypeScript SDK 严格类型检查与运行时、HTTP/JSON-RPC/gRPC callback 错误码、可信 `grpcs://` TLS、gRPC deadline/全局超时和终态竞争基础上，补固定上游 Node 客户端、更多官方客户端模式与更广的超时组合。
 2. 在已通过的 PostgreSQL/MySQL/Redis CI 矩阵之上，继续覆盖 Redis 网络分区、关系型存储升级读取和多 worker 接管。
 3. XA 在 Prepare 前后、分支注册后、全局决策后发生数据库容器/业务进程硬崩溃或网络超时的恢复。
 4. 真实 HTTPS 告警接收端、重定向拒绝、进程重启、持久审计 sink 和 Dashboard 暗色模式端到端。

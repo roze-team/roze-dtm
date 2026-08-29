@@ -1074,6 +1074,7 @@ pub struct HttpBranchInvoker {
     client: reqwest::Client,
     url_policy: BranchUrlPolicy,
     default_timeout: Option<Duration>,
+    tls_ca_pem: Option<Arc<[u8]>>,
     alert_webhook: Option<AlertWebhook>,
 }
 
@@ -1090,6 +1091,7 @@ impl std::fmt::Debug for HttpBranchInvoker {
             .debug_struct("HttpBranchInvoker")
             .field("url_policy", &self.url_policy)
             .field("default_timeout", &self.default_timeout)
+            .field("custom_tls_ca_configured", &self.tls_ca_pem.is_some())
             .field("alert_webhook_configured", &self.alert_webhook.is_some())
             .finish_non_exhaustive()
     }
@@ -1144,10 +1146,13 @@ impl BranchUrlPolicy {
 
 impl HttpBranchInvoker {
     pub fn new() -> Self {
+        ensure_tls_crypto_provider().expect("ring TLS crypto provider is available");
         Self {
-            client: branch_http_client(None).expect("default HTTP client configuration is valid"),
+            client: branch_http_client(None, None)
+                .expect("default HTTP client configuration is valid"),
             url_policy: BranchUrlPolicy::allow_all(),
             default_timeout: None,
+            tls_ca_pem: None,
             alert_webhook: None,
         }
     }
@@ -1168,20 +1173,32 @@ impl HttpBranchInvoker {
         url_policy: BranchUrlPolicy,
         alert_webhook: Option<AlertWebhookConfig>,
     ) -> anyhow::Result<Self> {
+        Self::with_timeout_policy_alert_and_tls_ca(timeout, url_policy, alert_webhook, None)
+    }
+
+    pub fn with_timeout_policy_alert_and_tls_ca(
+        timeout: Duration,
+        url_policy: BranchUrlPolicy,
+        alert_webhook: Option<AlertWebhookConfig>,
+        tls_ca_pem: Option<Vec<u8>>,
+    ) -> anyhow::Result<Self> {
+        ensure_tls_crypto_provider()?;
         let alert_webhook = alert_webhook
             .map(|config| {
                 config.validate()?;
                 Ok::<AlertWebhook, anyhow::Error>(AlertWebhook {
-                    client: branch_http_client(Some(config.timeout))?,
+                    client: branch_http_client(Some(config.timeout), None)?,
                     url: config.url,
                     retry_limit: config.retry_limit,
                 })
             })
             .transpose()?;
+        let tls_ca_pem = tls_ca_pem.map(Arc::<[u8]>::from);
         Ok(Self {
-            client: branch_http_client(Some(timeout))?,
+            client: branch_http_client(Some(timeout), tls_ca_pem.as_deref())?,
             url_policy,
             default_timeout: Some(timeout),
+            tls_ca_pem,
             alert_webhook,
         })
     }
@@ -1333,9 +1350,21 @@ impl HttpBranchInvoker {
             .request_timeout_millis
             .map(Duration::from_millis)
             .or(self.default_timeout);
+        let uses_tls = target.endpoint.starts_with("https://");
         let mut endpoint = tonic::transport::Endpoint::from_shared(target.endpoint)?;
         if let Some(timeout) = timeout {
             endpoint = endpoint.connect_timeout(timeout).timeout(timeout);
+        }
+        if uses_tls {
+            if let Some(tls_ca_pem) = &self.tls_ca_pem {
+                let mut tls = tonic::transport::ClientTlsConfig::new()
+                    .with_enabled_roots()
+                    .ca_certificate(tonic::transport::Certificate::from_pem(tls_ca_pem));
+                if let Some(timeout) = timeout {
+                    tls = tls.timeout(timeout);
+                }
+                endpoint = endpoint.tls_config(tls)?;
+            }
         }
         let channel = endpoint.connect().await?;
         let mut grpc = tonic::client::Grpc::new(channel);
@@ -1389,12 +1418,41 @@ struct GrpcCallbackTarget {
     method: String,
 }
 
-fn branch_http_client(timeout: Option<Duration>) -> anyhow::Result<reqwest::Client> {
+fn branch_http_client(
+    timeout: Option<Duration>,
+    tls_ca_pem: Option<&[u8]>,
+) -> anyhow::Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
     }
+    if let Some(pem) = tls_ca_pem {
+        anyhow::ensure!(!pem.is_empty(), "branch TLS CA PEM must not be empty");
+        let certificates =
+            reqwest::Certificate::from_pem_bundle(pem).context("branch TLS CA PEM is invalid")?;
+        anyhow::ensure!(
+            !certificates.is_empty(),
+            "branch TLS CA PEM does not contain a certificate"
+        );
+        for certificate in certificates {
+            builder = builder.add_root_certificate(certificate);
+        }
+    }
     Ok(builder.build()?)
+}
+
+fn ensure_tls_crypto_provider() -> anyhow::Result<()> {
+    if rustls::crypto::CryptoProvider::get_default().is_some() {
+        return Ok(());
+    }
+    if rustls::crypto::ring::default_provider()
+        .install_default()
+        .is_err()
+        && rustls::crypto::CryptoProvider::get_default().is_none()
+    {
+        anyhow::bail!("failed to install the ring TLS crypto provider");
+    }
+    Ok(())
 }
 
 fn parse_branch_url(value: &str) -> anyhow::Result<reqwest::Url> {
@@ -7767,5 +7825,18 @@ mod tests {
         );
         assert!(BranchUrlPolicy::from_allowed_origins(["file:///tmp/action"]).is_err());
         assert!(BranchUrlPolicy::from_allowed_origins(["https://user@example.com"]).is_err());
+    }
+
+    #[test]
+    fn branch_tls_ca_must_be_a_non_empty_pem_certificate_bundle() {
+        for invalid in [Vec::new(), b"not a certificate".to_vec()] {
+            assert!(HttpBranchInvoker::with_timeout_policy_alert_and_tls_ca(
+                Duration::from_secs(1),
+                BranchUrlPolicy::allow_all(),
+                None,
+                Some(invalid),
+            )
+            .is_err());
+        }
     }
 }
