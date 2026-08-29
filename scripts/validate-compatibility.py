@@ -12,6 +12,9 @@ PROTO = (ROOT / "proto/dtmgimp.proto").read_text(encoding="utf-8")
 SDK = (ROOT / "sdk/roze-dtm-compat.js").read_text(encoding="utf-8")
 DOC = (ROOT / "docs/dtm-compatibility.md").read_text(encoding="utf-8")
 NOTICE = (ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+GO_INTEROP_MOD = (ROOT / "interop/dtm-labs-go/go.mod").read_text(encoding="utf-8")
+GO_INTEROP_CLIENT = (ROOT / "interop/dtm-labs-go/main.go").read_text(encoding="utf-8")
+CI_PROTOCOL = (ROOT / "scripts/ci-protocol-integration.sh").read_text(encoding="utf-8")
 
 PINNED_REVISION = "18146ee53bafbf094b1a5f12ca7e8a29bdb57edd"
 
@@ -100,6 +103,9 @@ assert '"kv": entries,' not in SERVICE
 assert PINNED_REVISION in DOC
 assert PINNED_REVISION in NOTICE
 assert "BSD 3-Clause License" in NOTICE
+assert "github.com/dtm-labs/dtm v1.19.1-0.20260103134746-18146ee53baf" in GO_INTEROP_MOD
+assert PINNED_REVISION in GO_INTEROP_CLIENT
+assert "go run ." in CI_PROTOCOL
 
 print(
     f"validated {len(expected_http)} compatibility routes, "

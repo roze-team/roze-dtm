@@ -53,6 +53,15 @@ jobs:
       ROZE_TEST_REDIS_NAMESPACE: ci_cluster_faults
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.22.x
+          cache-dependency-path: interop/dtm-labs-go/go.sum
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -103,14 +112,20 @@ jobs:
         run: cargo deny check
       - name: Static protocol, Dashboard, and evidence gates
         run: |
+          bash -n scripts/ci-protocol-integration.sh
+          npm ci --prefix sdk
+          npm --prefix sdk run typecheck
           python -m py_compile scripts/*.py
           for script in scripts/*.mjs; do node --check "$script"; done
+          node --experimental-transform-types --check scripts/sdk-typescript-integration.ts
           python scripts/validate-openapi.py
           python scripts/validate-dashboard.py
           python scripts/validate-compatibility.py
           python scripts/validate-migration-closure.py
       - name: Test
         run: cargo test --workspace
+      - name: Real HTTP, JSON-RPC, gRPC, JavaScript, and TypeScript SDK integration
+        run: bash scripts/ci-protocol-integration.sh
       - name: Redis integration
         run: cargo test -p roze-dtm redis_store_round_trip_against_real_service -- --ignored --nocapture
       - name: Redis Cluster integration

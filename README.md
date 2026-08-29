@@ -35,12 +35,20 @@ cargo run -p roze-dtm-service
 ROZE_DTM_CONTROL_TOKEN='roze-dtm-smoke-token-32-bytes!!' \
 node scripts/local-protocol-integration.mjs
 
+ROZE_DTM_CONTROL_TOKEN='roze-dtm-smoke-token-32-bytes!!' \
+ROZE_DTM_EXPECTED_REVISION=$(git rev-parse HEAD) \
+node scripts/sdk-protocol-integration.mjs
+
+ROZE_DTM_CONTROL_TOKEN='roze-dtm-smoke-token-32-bytes!!' \
+ROZE_DTM_EXPECTED_REVISION=$(git rev-parse HEAD) \
+node --experimental-transform-types scripts/sdk-typescript-integration.ts
+
 ROZE_DTM_GRPC_ENDPOINT=http://127.0.0.1:36791 \
 ROZE_DTM_CONTROL_TOKEN='roze-dtm-smoke-token-32-bytes!!' \
 cargo run --example grpc_smoke
 ```
 
-协议脚本覆盖 HTTP 的 TCC、Saga、Workflow、Message、XA，JSON-RPC Saga，受保护的管理查询/force-stop、Dashboard 审计、低基数指标，以及一次可恢复的 Message 503 分支失败。它仅供本机验收，示例令牌和内存 SQLite 配置不得用于部署。
+协议脚本覆盖 HTTP 的 TCC、Saga、Workflow、Message、XA，JSON-RPC Saga，受保护的管理查询/force-stop、Dashboard 审计、低基数指标，以及一次可恢复的 Message 503 分支失败。SDK 门禁还通过仓库 JavaScript/TypeScript 客户端执行五种原生事务、DTM 兼容调用、callback 错误码与终态竞争，并通过固定提交 `18146ee53bafbf094b1a5f12ca7e8a29bdb57edd` 的 dtm-labs Go 官方客户端执行 Saga/Message。`bash scripts/ci-protocol-integration.sh` 可启动服务并串行执行全部 HTTP、JSON-RPC、gRPC 和跨语言验收。它仅供本机/CI 验收，示例令牌和内存 SQLite 配置不得用于部署。
 
 不启动 Rust 编译器时，可独立重建并核对 HTTP 合同：
 

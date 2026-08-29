@@ -4,3 +4,4 @@
 *.db-wal
 .env
 .reference/
+sdk/node_modules/

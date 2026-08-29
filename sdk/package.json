@@ -22,6 +22,12 @@
     "roze-dtm-compat.ts",
     "README.md"
   ],
+  "scripts": {
+    "typecheck": "tsc --project tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  },
   "engines": {
     "node": ">=18"
   }
