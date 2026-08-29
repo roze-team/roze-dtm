@@ -28,7 +28,7 @@ bash scripts/redis-integration.sh
 - 普通控制面写入与恢复写入并发时，stale transaction revision 被拒绝且动态分支不会被静默覆盖。
 - Cluster MOVED/ASK、节点重启、主从切换、断连恢复及同槽脚本行为。
 
-当前状态：服务端时间 + epoch 租约、恢复 fenced store、事务 revision/payload CAS、Workflow/屏障 fenced Lua、事务级屏障清理索引和 ignored integration tests 已加入源码；workspace 编译、单元测试和 Clippy 已在本地通过。CI 已从无副本三节点拓扑扩展为三主三从：使用迁移槽上的新 key 触发 ASK，使用同一已建 Cluster 连接在槽所有权改变后触发 MOVED，再停止实际槽 owner、等待副本提升、执行事务往返、重启旧主节点并再次执行往返。该故障矩阵是否通过以对应 revision 的 CI run 为准；网络分区和长时间运行仍为 `inconclusive`。
+当前状态：服务端时间 + epoch 租约、恢复 fenced store、事务 revision/payload CAS、Workflow/屏障 fenced Lua、事务级屏障清理索引和 ignored integration tests 已加入源码；workspace 编译、单元测试和 Clippy 已在本地通过。revision `20a46b92e70e94c17b0aaa9eb39e05ce88d4024e` 的 CI run `33239791535` 在三主三从拓扑中通过：使用迁移槽上的新 key 触发 ASK，使用同一已建 Cluster 连接在槽所有权改变后触发 MOVED，再停止实际槽 owner、等待副本提升、执行事务往返、重启旧主节点并再次执行往返。网络分区和长时间运行仍为 `inconclusive`。
 
 ## 协议互操作
 
