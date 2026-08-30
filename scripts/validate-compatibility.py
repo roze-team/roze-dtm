@@ -109,12 +109,14 @@ assert "github.com/dtm-labs/dtm v1.19.1-0.20260103134746-18146ee53baf" in GO_INT
 assert PINNED_REVISION in GO_INTEROP_CLIENT
 for go_interop_evidence in [
     "dtmcli.TccGlobalTransaction", "dtmcli.ErrFailure", '"tcc_cancel"',
-    '\\"modes\\":[\\"tcc\\",\\"saga\\",\\"message\\"]',
+    "dtmcli.XaGlobalTransaction", "dtmcli.XaLocalTransaction",
+    "ROZE_DTM_TEST_POSTGRES_URL", "ROZE_DTM_REQUIRE_XA", '"xa_executed"',
 ]:
     assert go_interop_evidence in GO_INTEROP_CLIENT, {
         "missing_go_interop_evidence": go_interop_evidence
     }
 assert "go run ." in CI_PROTOCOL
+assert 'ROZE_DTM_REQUIRE_XA: "true"' in (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 assert "cargo run --example grpc_callback_smoke" in CI_PROTOCOL
 assert "package workflow_callback_test;" in GRPC_CALLBACK_PROTO
 for callback_evidence in [

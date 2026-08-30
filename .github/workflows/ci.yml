@@ -47,6 +47,7 @@ jobs:
           --health-retries 20
     env:
       ROZE_DTM_TEST_POSTGRES_URL: postgres://roze:roze-test@127.0.0.1:5432/roze_dtm
+      ROZE_DTM_REQUIRE_XA: "true"
       ROZE_DTM_TEST_MYSQL_URL: mysql://roze:roze-test@127.0.0.1:3306/roze_dtm
       ROZE_TEST_REDIS_URL: redis://127.0.0.1:6379
       ROZE_TEST_REDIS_CLUSTER_URLS: redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002,redis://127.0.0.1:7003,redis://127.0.0.1:7004,redis://127.0.0.1:7005

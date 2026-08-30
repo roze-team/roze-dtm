@@ -5,6 +5,7 @@ go 1.22
 require (
 	github.com/dtm-labs/dtm v1.19.1-0.20260103134746-18146ee53baf
 	github.com/go-resty/resty/v2 v2.7.0
+	github.com/lib/pq v1.10.7
 )
 
 require (
