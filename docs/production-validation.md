@@ -38,7 +38,7 @@ HTTP、JSON-RPC 和 gRPC 兼容协议需要使用固定上游客户端版本执�
 
 并发 Saga 的源码合同覆盖依赖 DAG 校验、同层并发、后继等待和逆依赖补偿；HTTP 兼容层映射上游 `custom_data.concurrent/orders`。并发 Message 的源码合同覆盖同时投递、部分失败保留成功结果、仅重试失败分支，以及与延迟投递组合时到期前零调用；HTTP/JSON-RPC 兼容层映射上游请求顶层 `concurrent`。相关 Rust 测试已通过，单分支 503 后恢复重试已在真实服务 smoke 中通过；多进程并发、网络分区和重启故障注入仍为 `inconclusive`。
 
-延迟 Message 的源码合同覆盖提交决策先持久化、到期前零分支调用、绝对恢复时间和到期后正常投递；HTTP/JSON-RPC/gRPC 兼容请求共享 `custom_data.delay` 秒到毫秒映射。Rust 测试已通过；`scripts/message-restart-integration.mjs` 进一步使用文件 SQLite 创建延迟 Message，在到期前强制终止协调器，跨过投递点与旧租约到期后使用不同 worker id 重启，验证恢复到 `Succeeded`、仅一次分支调用和稳定终态。本地短时门禁已通过；生产 PostgreSQL/Redis 多实例重启、网络分区与长时间负载仍为 `inconclusive`。
+延迟 Message 的源码合同覆盖提交决策先持久化、到期前零分支调用、绝对恢复时间和到期后正常投递；HTTP/JSON-RPC/gRPC 兼容请求共享 `custom_data.delay` 秒到毫秒映射。Rust 测试已通过；`scripts/message-restart-integration.mjs` 进一步使用文件 SQLite 创建延迟 Message，在到期前强制终止协调器，跨过投递点与旧租约到期后使用不同 worker id 重启，验证恢复到 `Succeeded`、仅一次分支调用和稳定终态。revision `244f02beb053a4b0a141ad2e43c39b4ecf98462a` 的 CI run `33284169721` 已通过该门禁及完整跨语言/真实依赖矩阵；生产 PostgreSQL/Redis 多实例重启、网络分区与长时间负载仍为 `inconclusive`。
 
 分支重试告警源码合同覆盖顺序/并发失败路径、阈值、超时、URL 查询串移除、配置 Debug 脱敏和告警失败不干扰事务恢复，相关 Rust 测试已通过。生产验收仍需使用真实 HTTPS 接收端验证阈值前零调用、阈值后重复通知、非 2xx、超时、断连、服务重启与 payload/log/Dashboard 泄漏检查，状态为 `inconclusive`。
 
