@@ -44,7 +44,7 @@
 
 以下事项不能用更多源码声明或一次短时 smoke 替代：
 
-1. 在已通过的固定 dtm-labs Go TCC 成功/失败回滚、Saga/Message、Rust gRPC、JavaScript/TypeScript SDK 严格类型检查与运行时、HTTP/JSON-RPC/gRPC callback 错误码、可信 `grpcs://` TLS、gRPC deadline/全局超时和终态竞争基础上，等待新增真实 PostgreSQL XA 提交/回滚门禁通过，并继续补固定上游 Node 客户端与更广的超时组合。固定 Go `dtmcli` 不提供 Workflow helper，不再将其列为可执行矩阵项。
+1. 固定 dtm-labs Go TCC 成功/失败回滚、Saga/Message、真实 PostgreSQL XA 提交/回滚、Rust gRPC、JavaScript/TypeScript SDK 严格类型检查与运行时、HTTP/JSON-RPC/gRPC callback 错误码、可信 `grpcs://` TLS、gRPC deadline/全局超时和终态竞争均已通过；继续补固定上游 Node 客户端与更广的超时组合。固定 Go `dtmcli` 不提供 Workflow helper，不再将其列为可执行矩阵项。
 2. 在已通过的 PostgreSQL/MySQL/Redis CI 矩阵之上，继续覆盖 Redis 网络分区、关系型存储升级读取和多 worker 接管。
 3. XA 在 Prepare 前后、分支注册后、全局决策后发生数据库容器/业务进程硬崩溃或网络超时的恢复。
 4. 真实 HTTPS 告警接收端、重定向拒绝、进程重启、持久审计 sink 和 Dashboard 暗色模式端到端。
