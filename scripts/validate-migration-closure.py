@@ -15,6 +15,9 @@ XA = (ROOT / "src/xa.rs").read_text(encoding="utf-8")
 REDIS_STORE = (ROOT / "src/redis_store.rs").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 CLOSURE = (ROOT / "docs/migration-closure.md").read_text(encoding="utf-8")
+PRODUCTION = (ROOT / "docs/production-validation.md").read_text(encoding="utf-8")
+CI = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+MESSAGE_RESTART = (ROOT / "scripts/message-restart-integration.mjs").read_text(encoding="utf-8")
 
 for variant in ["Tcc", "Saga", "Workflow", "Message", "Xa"]:
     assert f"    {variant}," in CORE, {"missing_transaction_kind": variant}
@@ -78,6 +81,7 @@ for artifact in [
     "docs/production-validation.md", "docs/migration-closure.md",
     "THIRD_PARTY_NOTICES.md", "service/static/openapi.json",
     "sdk/roze-dtm.ts", "sdk/roze-dtm-compat.ts",
+    "scripts/message-restart-integration.mjs",
 ]:
     assert (ROOT / artifact).is_file(), {"missing_artifact": artifact}
 
@@ -92,4 +96,12 @@ for phrase in [
     assert phrase in CLOSURE, {"missing_closure_statement": phrase}
 
 assert "scripts/validate-migration-closure.py" in README
+assert "node scripts/message-restart-integration.mjs" in CI
+for evidence in [
+    'delay_millis: 4_000', 'child.kill("SIGKILL")',
+    '"restart-worker-before"', '"restart-worker-after"',
+    'branchCalls === 1', 'waitForStatus(gid, "succeeded"',
+]:
+    assert evidence in MESSAGE_RESTART, {"missing_message_restart_evidence": evidence}
+assert "scripts/message-restart-integration.mjs" in PRODUCTION
 print("validated Roze baseline superset, five transaction modes, five stores, clients, governance and closure evidence")

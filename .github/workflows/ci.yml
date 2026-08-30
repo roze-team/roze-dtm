@@ -124,8 +124,10 @@ jobs:
           python scripts/validate-migration-closure.py
       - name: Test
         run: cargo test --workspace
-      - name: Real HTTP, JSON-RPC, gRPC, JavaScript, and TypeScript SDK integration
-        run: bash scripts/ci-protocol-integration.sh
+      - name: Real protocol, SDK, and delayed Message restart integration
+        run: |
+          bash scripts/ci-protocol-integration.sh
+          node scripts/message-restart-integration.mjs
       - name: Redis integration
         run: cargo test -p roze-dtm redis_store_round_trip_against_real_service -- --ignored --nocapture
       - name: Redis Cluster integration
